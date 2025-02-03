@@ -54,7 +54,7 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         """Initialize flow."""
-        self._host: str | None = None
+        self._host = "192.168.0.38"  #: str | None = None
         self._port: int | None = None
         self._device_info: DeviceInfo | None = None
         self._password: str | None = None
@@ -91,12 +91,11 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         """Step 2: Configure the resistive sensor module."""
         errors = {}
         print("Configuring resistive sensor")
-        print(self._device_name)
+        # print(json.dumps(self.__dict__, indent=2, default=str))
 
         if user_input is not None:
             return self.async_create_entry(
                 title=self._device_name,
-                device_info=self._device_info,
                 data={
                     "device": self._device_name,
                     "device_type": "smartvanio.resistive_sensor",
@@ -112,6 +111,7 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
                         "type": user_input["sensor_2_type"],
                         "name": user_input["sensor_2_name"],
                     },
+                    "device_info": self._device_info,
                 },
             )
 
