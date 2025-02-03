@@ -90,67 +90,41 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
     async def async_step_resistive_sensor(self, user_input=None):
         """Step 2: Configure the resistive sensor module."""
         errors = {}
+        print("Configuring resistive sensor")
+        print(self._device_name)
 
         if user_input is not None:
-            print("Configured Resistive Sensor: %s", self.device_id)
             return self.async_create_entry(
-                title=self.device_id,
+                title=self._device_name,
+                device_info=self._device_info,
                 data={
-                    "device": self.device_id,
+                    "device": self._device_name,
                     "device_type": "smartvanio.resistive_sensor",
+                    "host": self._host,
+                    "port": self._port,
+                    "password": self._password,
+                    "noise_psk": self._noise_psk,
                     "sensor_1": {
                         "type": user_input["sensor_1_type"],
                         "name": user_input["sensor_1_name"],
-                        "unit": user_input["sensor_1_unit"],
-                        "calibration": [
-                            (
-                                user_input["calibration_1_raw"],
-                                user_input["calibration_1_value"],
-                            ),
-                            (
-                                user_input["calibration_2_raw"],
-                                user_input["calibration_2_value"],
-                            ),
-                        ],
                     },
                     "sensor_2": {
                         "type": user_input["sensor_2_type"],
                         "name": user_input["sensor_2_name"],
-                        "unit": user_input["sensor_2_unit"],
-                        "calibration": [
-                            (
-                                user_input["calibration_2_1_raw"],
-                                user_input["calibration_2_1_value"],
-                            ),
-                            (
-                                user_input["calibration_2_2_raw"],
-                                user_input["calibration_2_2_value"],
-                            ),
-                        ],
                     },
                 },
             )
 
         data_schema = vol.Schema(
             {
+                vol.Required("sensor_1_name", default="Sensor 1"): str,
                 vol.Required("sensor_1_type", default="water_tank"): vol.In(
                     SENSOR_TYPES
                 ),
-                vol.Required("sensor_1_name", default="Sensor 1"): str,
-                vol.Required("sensor_1_unit", default="%"): str,
-                vol.Required("calibration_1_raw", default=0): vol.Coerce(float),
-                vol.Required("calibration_1_value", default=0): vol.Coerce(float),
-                vol.Required("calibration_2_raw", default=4095): vol.Coerce(float),
-                vol.Required("calibration_2_value", default=100): vol.Coerce(float),
-                vol.Required("sensor_2_type", default="temperature"): vol.In(
+                vol.Required("sensor_2_name", default="Sensor 2"): str,
+                vol.Required("sensor_2_type", default="water_tank"): vol.In(
                     SENSOR_TYPES
                 ),
-                vol.Required("sensor_2_name", default="Sensor 2"): str,
-                vol.Required("sensor_2_unit", default="°C"): str,
-                vol.Required("calibration_2_1_raw", default=0): vol.Coerce(float),
-                vol.Required("calibration_2_1_value", default=0): vol.Coerce(float),
-                vol.Required("calibration_2_2_raw", default=4095): vol.Coerce(float),
-                vol.Required("calibration_2_2_value", default=100): vol.Coerce(float),
             }
         )
 
@@ -227,6 +201,9 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
 
         if project_name == "smartvanio.inclinometer":
             return await self.async_step_inclinometer()
+
+        if project_name == "smartvanio.resistive_sensor":
+            return await self.async_step_resistive_sensor()
 
         return self._async_get_entry()
 

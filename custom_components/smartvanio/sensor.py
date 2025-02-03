@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+import json
+import logging
 import math
 
 from aioesphomeapi import (
@@ -15,6 +17,7 @@ from aioesphomeapi import (
 )
 from aioesphomeapi.model import LastResetType
 
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.components.sensor import (
     SensorDeviceClass,
     SensorEntity,
@@ -29,11 +32,17 @@ from homeassistant.util.enum import try_parse_enum
 from .entity import EsphomeEntity, platform_async_setup_entry
 from .enum_mapper import EsphomeEnumMapper
 
+_LOGGER = logging.getLogger(__name__)
+
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     """Set up esphome sensors based on a config entry."""
+
+    print("SETTING UP SENSOR")
+    print(json.dumps(entry.data, indent=2, default=str))
+
     await platform_async_setup_entry(
         hass,
         entry,
@@ -50,6 +59,27 @@ async def async_setup_entry(
         entity_type=EsphomeTextSensor,
         state_type=TextSensorState,
     )
+
+    device_type = entry.data.get("device_type", "")
+    print(device_type)
+    if device_type == "smartvanio.resistive_sensor":
+        print("SETTING UP resistive SENSOR")
+        _LOGGER.info(f"Setting up SmartVanCalibratedSensor for {entry.title}")
+
+        # Get the raw sensor entity ID
+        raw_sensor_id = entry.data.get("raw_sensor_id", "sensor.raw_sensor_value")
+
+        # Load calibration data
+        calibration_data = json.loads(entry.data.get("calibration", "[]"))
+
+        # Create the calibrated sensor
+        calibrated_sensor = SmartVanCalibratedSensor(
+            hass, entry, raw_sensor_id, calibration_data
+        )
+        async_add_entities([calibrated_sensor])
+
+        # Register calibration service
+        # async_register_calibration_service(hass)
 
 
 _STATE_CLASSES: EsphomeEnumMapper[EsphomeSensorStateClass, SensorStateClass | None] = (
@@ -132,3 +162,72 @@ class EsphomeTextSensor(EsphomeEntity[TextSensorInfo, TextSensorState], SensorEn
         ):
             return value.date()
         return state_str
+
+
+class SmartVanCalibratedSensor(SensorEntity):
+    """A sensor that applies calibration to a raw ESPHome sensor value."""
+
+    def __init__(self, hass, entry, raw_sensor_id, calibration_data):
+        """Initialize the calibrated sensor."""
+        print("INITIALZED SMARTVAN SENSOR")
+        print(raw_sensor_id)
+        self.hass = hass
+        self.entry = entry
+        self._state = None
+        self._raw_sensor_id = raw_sensor_id  # This is the raw ESPHome sensor ID
+        self._calibration_data = "[]"
+        self._name = f"{entry.title} Calibrated Sensor"
+        self._attr_unique_id = f"{entry.entry_id}_calibration_data"
+        self._attr_device_info = DeviceInfo(
+            identifiers={("smartvanio", "smartvanio-rs 4a0afc")},
+            manufacturer="smartvanio",
+            model="resistive_sensor",
+            name="smartvanio-rs 4a0afc",
+        )
+
+    @property
+    def name(self):
+        print("NAME %s", self._name)
+        return self._name
+
+    @property
+    def state(self):
+        """Return the interpolated sensor value."""
+        raw_state = self.hass.states.get(self._raw_sensor_id)
+        if raw_state is None or raw_state.state in ["unknown", "unavailable"]:
+            return None
+
+        try:
+            raw_value = float(raw_state.state)
+        except ValueError:
+            return None
+
+        return self._interpolate(raw_value)
+
+    @property
+    def unit_of_measurement(self):
+        return self.entry.data.get("unit", "Custom")
+
+    def _interpolate(self, raw_value):
+        """Perform linear interpolation using calibration data."""
+        if not self._calibration_data or len(self._calibration_data) < 2:
+            return raw_value  # No calibration data, return raw
+
+        sorted_points = sorted(self._calibration_data, key=lambda x: x[0])
+        for i in range(len(sorted_points) - 1):
+            x1, y1 = sorted_points[i]
+            x2, y2 = sorted_points[i + 1]
+            if x1 <= raw_value <= x2:
+                return y1 + (raw_value - x1) * (y2 - y1) / (x2 - x1)
+
+        return raw_value  # Default to raw if out of range
+
+    async def async_update_calibration(self, calibration_data):
+        """Update calibration data and store it in the config entry."""
+        self._calibration_data = calibration_data
+
+        # Update the stored calibration data in the integration
+        updated_data = {**self.entry.data, "calibration": json.dumps(calibration_data)}
+        self.hass.config_entries.async_update_entry(self.entry, data=updated_data)
+
+        self.async_schedule_update_ha_state()

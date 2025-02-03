@@ -1,0 +1,10 @@
+set_calibration:
+  name: Set Calibration Data
+  description: Update the calibration data for the resistive sensor.
+  fields:
+    entity_id:
+      description: "The calibrated sensor entity to update."
+      example: "sensor.smartvan_calibrated"
+    calibration:
+      description: "A list of calibration points (voltage, mapped_value)."
+      example: "[[0, 0], [1, 10], [2, 20]]"
