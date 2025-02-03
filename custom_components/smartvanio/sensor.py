@@ -70,9 +70,7 @@ async def async_setup_entry(
     if device_type == "smartvanio.resistive_sensor":
         # Create the calibrated sensor
         device_prefix = entry.title.replace("-", "_").lower()
-        sensor_id = (
-            f"sensor.{device_prefix}_sensor_1"  # This is the raw ESPHome sensor ID
-        )
+        sensor_id = f"{device_prefix}_sensor_1"  # This is the raw ESPHome sensor ID
         interpolated_sensor = SmartVanInterpolatedSensor(
             hass,
             entry,
@@ -202,9 +200,9 @@ class SmartVanInterpolatedSensor(SensorEntity):
     @property
     def state(self):
         """Return the interpolated sensor value."""
-        raw_state = self.hass.states.get(self._sensor_id)
+        raw_state = self.hass.states.get(f"sensor.{self._sensor_id}")
 
-        print(self.hass.states.get(self._sensor_id))
+        # print(self.hass.states.get(self._sensor_id))
 
         if raw_state is None or raw_state.state in ["unknown", "unavailable"]:
             return None
@@ -223,16 +221,20 @@ class SmartVanInterpolatedSensor(SensorEntity):
     def _interpolate(self, raw_value):
         """Perform linear interpolation using calibration data."""
         interpolation_points = self.hass.states.get(
-            f"sensor.{self._sensor_id}_interpolation_points"
-        )
+            "sensor.smartvanio_rs_4a0afc_sensor_1_interpolation_points"
+        ).state
 
-        print(self.hass.states.get(f"sensor.{self._sensor_id}_interpolation_points"))
+        print("HELLO")
 
         if not interpolation_points:
             print("Calibration data is empty")
             return raw_value
 
-        sorted_points = sorted(interpolation_points, key=lambda x: x[0])
+        print("HELLO2", interpolation_points)
+
+        points = json.loads(interpolation_points)
+
+        sorted_points = sorted(points, key=lambda x: x[0])
         x_vals, y_vals = zip(*sorted_points, strict=False)  # Unzip into separate lists
 
         interpolator = interp1d(
