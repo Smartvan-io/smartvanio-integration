@@ -27,7 +27,7 @@ from homeassistant.config_entries import (
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PASSWORD, CONF_PORT
 from homeassistant.core import callback
 from homeassistant.helpers.device_registry import format_mac
-from homeassistant.helpers.entity_registry import async_get
+from homeassistant.data_entry_flow import section
 
 from .const import (
     CONF_ALLOW_SERVICE_CALLS,
@@ -90,8 +90,8 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
     async def async_step_resistive_sensor(self, user_input=None):
         """Step 2: Configure the resistive sensor module."""
         errors = {}
-        print("Configuring resistive sensor")
-        # print(json.dumps(self.__dict__, indent=2, default=str))
+
+        print(user_input)
 
         if user_input is not None:
             return self.async_create_entry(
@@ -104,16 +104,26 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
                     "password": self._password,
                     "noise_psk": self._noise_psk,
                     "sensor_1": {
-                        "type": user_input["sensor_1_type"],
-                        "name": user_input["sensor_1_name"],
-                        "min_resistance": user_input["sensor_1_min_resistance"],
-                        "max_resistance": user_input["sensor_1_max_resistance"],
+                        # "type": user_input["sensor_1_type"],
+                        "name": user_input["sensor_1"]["sensor_1_name"],
+                        "min_resistance": user_input["sensor_1"][
+                            "sensor_1_min_resistance"
+                        ],
+                        "max_resistance": user_input["sensor_1"][
+                            "sensor_1_max_resistance"
+                        ],
+                        "interpolation_points": "[]",
                     },
                     "sensor_2": {
-                        "type": user_input["sensor_2_type"],
-                        "name": user_input["sensor_2_name"],
-                        "min_resistance": user_input["sensor_2_min_resistance"],
-                        "max_resistance": user_input["sensor_2_max_resistance"],
+                        # "type": user_input["sensor_2_type"],
+                        "name": user_input["sensor_2"]["sensor_2_name"],
+                        "min_resistance": user_input["sensor_2"][
+                            "sensor_2_min_resistance"
+                        ],
+                        "max_resistance": user_input["sensor_2"][
+                            "sensor_2_max_resistance"
+                        ],
+                        "interpolation_points": "[]",
                     },
                     "device_info": self._device_info,
                 },
@@ -121,18 +131,30 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
 
         data_schema = vol.Schema(
             {
-                vol.Required("sensor_1_name", default="Sensor 1"): str,
-                vol.Required("sensor_1_type", default="water_tank"): vol.In(
-                    SENSOR_TYPES
+                vol.Required("sensor_1"): section(
+                    vol.Schema(
+                        {
+                            vol.Required("sensor_1_name", default="Sensor 1"): str,
+                            # vol.Required("sensor_1_type", default="water_tank"): vol.In(
+                            #     SENSOR_TYPES
+                            # ),
+                            vol.Required("sensor_1_min_resistance", default=0): int,
+                            vol.Required("sensor_1_max_resistance", default=190): int,
+                        }
+                    )
                 ),
-                vol.Required("sensor_1_min_resistance", default=0): str,
-                vol.Required("sensor_1_max_resistance", default=190): str,
-                vol.Required("sensor_2_name", default="Sensor 2"): str,
-                vol.Required("sensor_2_type", default="water_tank"): vol.In(
-                    SENSOR_TYPES
+                vol.Required("sensor_2"): section(
+                    vol.Schema(
+                        {
+                            vol.Required("sensor_2_name", default="Sensor 2"): str,
+                            # vol.Required("sensor_2_type", default="water_tank"): vol.In(
+                            #     SENSOR_TYPES
+                            # ),
+                            vol.Required("sensor_2_min_resistance", default=0): int,
+                            vol.Required("sensor_2_max_resistance", default=190): int,
+                        }
+                    )
                 ),
-                vol.Required("sensor_2_min_resistance", default=0): str,
-                vol.Required("sensor_2_max_resistance", default=190): str,
             }
         )
 
@@ -176,7 +198,6 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle a flow initialized by the user."""
-        print("LOCATED: async_step_user")
         return await self._async_step_user_base(user_input=user_input)
 
     @property
@@ -190,7 +211,6 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
 
     async def _async_try_fetch_device_info(self) -> ConfigFlowResult:
         """Try to fetch device info and return any errors."""
-        print("LOCATED: _async_try_fetch_device_info")
         response: str | None
         # After 2024.08, stop trying to fetch device info without encryption
         # so we can avoid probe requests to check for password. At this point
@@ -225,7 +245,6 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
     async def async_step_zeroconf(
         self, discovery_info: zeroconf.ZeroconfServiceInfo
     ) -> ConfigFlowResult:
-        print("located: async_step_zeroconf")
         """Handle zeroconf discovery."""
         mac_address: str | None = discovery_info.properties.get("mac")
 
@@ -267,7 +286,6 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         config_options = {
             CONF_ALLOW_SERVICE_CALLS: DEFAULT_NEW_CONFIG_ALLOW_ALLOW_SERVICE_CALLS,
         }
-        print("located: _async_get_entry")
 
         assert self._name is not None
         return self.async_create_entry(
@@ -278,7 +296,6 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
 
     async def fetch_device_info(self) -> str | None:
         """Fetch device info from API and return any errors."""
-        print("located: fetch_device_info")
         zeroconf_instance = await zeroconf.async_get_instance(self.hass)
         assert self._host is not None
         assert self._port is not None
@@ -354,7 +371,6 @@ class OptionsFlowHandler(OptionsFlow):
 
     def async_step_resistive_sensor(self, user_input=None):
         """Step 2: Configure the resistive sensor module."""
-        print("TITLE", self.config_entry.title)
 
         data = dict(self.config_entry.data)
         current_options = dict(self.config_entry.options)
@@ -387,36 +403,40 @@ class OptionsFlowHandler(OptionsFlow):
 
         data_schema = vol.Schema(
             {
-                vol.Required(
-                    "sensor_1_name", default=data.get("sensor_1", {}).get("name", "")
-                ): str,
-                vol.Required(
-                    "sensor_1_type",
-                    default=data.get("sensor_1", {}).get("type", SENSOR_TYPES),
-                ): vol.In(SENSOR_TYPES),
-                vol.Required(
-                    "sensor_1_min_resistance",
-                    default=data.get("sensor_1", {}).get("min_resistance", 0),
-                ): int,
-                vol.Required(
-                    "sensor_1_max_resistance",
-                    default=data.get("sensor_1", {}).get("max_resistance", 190),
-                ): int,
-                vol.Required(
-                    "sensor_2_name", default=data.get("sensor_2", {}).get("name", "")
-                ): str,
-                vol.Required(
-                    "sensor_2_type",
-                    default=data.get("sensor_2", {}).get("type", SENSOR_TYPES),
-                ): vol.In(SENSOR_TYPES),
-                vol.Required(
-                    "sensor_2_min_resistance",
-                    default=data.get("sensor_2", {}).get("min_resistance", 0),
-                ): int,
-                vol.Required(
-                    "sensor_2_max_resistance",
-                    default=data.get("sensor_2", {}).get("max_resistance", 190),
-                ): int,
+                vol.Required("sensor_1"): section(
+                    {
+                        vol.Required(
+                            "sensor_1_name",
+                            default=data.get("sensor_1", {}).get("name", ""),
+                        ): str,
+                        vol.Required(
+                            "sensor_1_min_resistance",
+                            default=data.get("sensor_1", {}).get("min_resistance", 0),
+                        ): int,
+                        vol.Required(
+                            "sensor_1_max_resistance",
+                            default=data.get("sensor_1", {}).get("max_resistance", 190),
+                        ): int,
+                    },
+                    {"collapsed": False},
+                ),
+                vol.Required("sensor_2"): section(
+                    {
+                        vol.Required(
+                            "sensor_2_name",
+                            default=data.get("sensor_2", {}).get("name", ""),
+                        ): str,
+                        vol.Required(
+                            "sensor_2_min_resistance",
+                            default=data.get("sensor_2", {}).get("min_resistance", 0),
+                        ): int,
+                        vol.Required(
+                            "sensor_2_max_resistance",
+                            default=data.get("sensor_2", {}).get("max_resistance", 190),
+                        ): int,
+                    },
+                    {"collapsed": True},
+                ),
             }
         )
 

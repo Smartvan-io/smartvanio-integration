@@ -13,7 +13,6 @@ from homeassistant.const import (
 )
 from homeassistant.core import HomeAssistant
 import homeassistant.helpers.config_validation as cv
-import json
 from homeassistant.helpers.typing import ConfigType
 
 from .const import CONF_NOISE_PSK, DATA_FFMPEG_PROXY, DOMAIN
@@ -44,9 +43,6 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
 async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
     """Set up the esphome component."""
 
-    print("async_setup_entry, entry.__dict__")
-    print(json.dumps(entry.__dict__, indent=2, default=str))
-
     host: str = entry.data[CONF_HOST]
     port: int = entry.data[CONF_PORT]
     password: str | None = entry.data[CONF_PASSWORD]
@@ -66,7 +62,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> b
     domain_data = DomainData.get(hass)
     entry_data = RuntimeEntryData(
         client=cli,
-        entry_id=entry.entry_id,
+        entry_id=f"{entry.entry_id}sdsfsdfsdf",
         title=entry.title,
         store=domain_data.get_or_create_store(hass, entry),
         original_options=dict(entry.options),

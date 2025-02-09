@@ -24,6 +24,26 @@
         },
         "description": "Configure your inclinometer"
       },
+      "resistive_sensor": {
+        "sections": {
+          "sensor_1": {
+            "name": "Sensor 1",
+            "data": {
+              "sensor_1_name": "Name",
+              "sensor_1_min_resistance": "Minimum resistance",
+              "sensor_1_max_resistance": "Maximum resistance"
+            }
+          },
+          "sensor_2": {
+            "name": "Sensor 2",
+            "data": {
+              "sensor_2_name": "Name",
+              "sensor_2_min_resistance": "Minimum resistance",
+              "sensor_2_max_resistance": "Maximum resistance"
+            }
+          }
+        }
+      },
       "authenticate": {
         "data": {
           "password": "Password"
@@ -116,8 +136,23 @@
   "options": {
     "step": {
       "init": {
-        "data": {
-          "allow_service_calls": "Allow the device to perform Home Assistant actions."
+        "sections": {
+          "sensor_1": {
+            "name": "Sensor 1",
+            "data": {
+              "sensor_1_name": "Name",
+              "sensor_1_min_resistance": "Minimum resistance",
+              "sensor_1_max_resistance": "Maximum resistance"
+            }
+          },
+          "sensor_2": {
+            "name": "Sensor 2",
+            "data": {
+              "sensor_2_name": "Name",
+              "sensor_2_min_resistance": "Minimum resistance",
+              "sensor_2_max_resistance": "Maximum resistance"
+            }
+          }
         }
       }
     }

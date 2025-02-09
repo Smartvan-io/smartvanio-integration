@@ -30,7 +30,6 @@ from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import (
     async_track_state_change,
-    async_track_entity_registry_updated_event,
 )
 
 from homeassistant.util import dt as dt_util
@@ -47,8 +46,6 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     """Set up esphome sensors based on a config entry."""
-
-    print("SETTING UP SENSOR")
     await platform_async_setup_entry(
         hass,
         entry,
@@ -70,30 +67,62 @@ async def async_setup_entry(
     if device_type == "smartvanio.resistive_sensor":
         # Create the calibrated sensor
         # This is the raw ESPHome sensor ID
-        interpolated_sensor = SmartVanInterpolatedSensor(
+        interpolated_sensor_1 = SmartVanInterpolatedSensor(
             hass,
             entry,
             "sensor_1",
             device_info=entry.data.get("device_info"),
         )
-        interpolation_points = SmartVanInterpolationPointsEntity(
+
+        interpolated_sensor_2 = SmartVanInterpolatedSensor(
             hass,
             entry,
-            "sensor_1",
+            "sensor_2",
             device_info=entry.data.get("device_info"),
         )
-        async_add_entities([interpolated_sensor, interpolation_points])
 
-        # Register calibration service
-        # async_register_calibration_service(hass)
+        async_add_entities([interpolated_sensor_1, interpolated_sensor_2])
 
-    async def set_calibration_data(call: ServiceCall):
-        """Handle the service call to update calibration data."""
-        new_value = call.data.get("value", 0)
-        interpolation_points.set_value(new_value)  # Call method on the sensor
+    async def handle_update_config_entry(call: ServiceCall):
+        sensor_id = call.data["sensor_id"]
+        device_id = call.data["device_id"]
+        interpolation_points = call.data.get("interpolation_points")
+        interpolation_kind = call.data.get("interpolation_kind")
+
+        # Find the relevant config entry
+        entry = None
+        for e in hass.config_entries.async_entries(DOMAIN):
+            if e.data.get("device") == device_id:
+                entry = e
+                break
+
+        if not entry:
+            # Optionally log an error if entry not found
+            return
+
+        # 1. Merge new data into the entry's options (or data if desired)
+        new_options = dict(entry.options)
+
+        # For example, store sensor_1 in options
+        sensor = new_options.get(sensor_id, {})
+        if interpolation_points is not None:
+            sensor["interpolation_points"] = interpolation_points
+
+        if interpolation_kind is not None:
+            sensor["interpolation_kind"] = interpolation_kind
+
+        new_options[sensor_id] = sensor
+
+        # 2. Update the entry
+        hass.config_entries.async_update_entry(entry, options=new_options)
+
+        # 3. Reload if necessary so changes take effect immediately
+        await hass.config_entries.async_reload(entry.entry_id)
+
+        # Register the service
 
     hass.services.async_register(
-        "smartvanio", "set_calibration_data", set_calibration_data
+        DOMAIN, "update_config_entry", handle_update_config_entry
     )
 
 
@@ -184,7 +213,6 @@ class SmartVanInterpolatedSensor(SensorEntity):
 
     def __init__(self, hass, entry, sensor_id, device_info):
         """Initialize the calibrated sensor."""
-        print("INITIALZED SMARTVAN SENSOR")
 
         device_prefix = entry.title.replace("-", "_").lower()
         sensor_id_with_prefix = f"{device_prefix}_{sensor_id}"
@@ -192,26 +220,41 @@ class SmartVanInterpolatedSensor(SensorEntity):
         self.entry = entry
         self._state = None
         self._device_prefix = device_prefix
+        self._sensor = sensor_id
         self._sensor_id = f"sensor.{sensor_id_with_prefix}"
         self._name = f"{sensor_id} Interpolated Value"
-        self._attr_unique_id = f"{entry.entry_id}_interpolated_value"
+        self._attr_unique_id = f"{self._sensor_id}_interpolated_value"
+        self.entity_id = f"sensor.{sensor_id_with_prefix}_interpolated_value"
         self._device_info = device_info
         self._attr_device_info = DeviceInfo(
             connections={(dr.CONNECTION_NETWORK_MAC, "34:CD:B0:4A:0A:FC")}
         )
-        self._attr_calibration = "[[0, 1], [2, 20], [3, 40]]"
         async_track_state_change(
             hass, self._sensor_id, self._async_sensor_state_changed
-        )
-        async_track_state_change(
-            hass,
-            f"{self._sensor_id}_interpolation_points",
-            self._async_sensor_state_changed,
         )
 
     @property
     def name(self):
         return self._name
+
+    @property
+    def extra_state_attributes(self):
+        # Merge data and options
+        data = self.entry.data.get(self._sensor, {})
+        options = self.entry.options.get(self._sensor, {})
+
+        # Or combine them in some way
+        min_resistance = options.get("min_resistance", data.get("min_resistance", 0))
+        max_resistance = options.get("max_resistance", data.get("max_resistance", 190))
+        interpolation_points = options.get(
+            "interpolation_points", data.get("interpolation_points", "[[]]")
+        )
+
+        return {
+            "min_resistance": min_resistance,
+            "max_resistance": max_resistance,
+            "interpolation_points": interpolation_points,
+        }
 
     @property
     def state(self):
@@ -229,23 +272,32 @@ class SmartVanInterpolatedSensor(SensorEntity):
 
     def _interpolate(self, raw_value):
         """Perform linear interpolation using calibration data."""
-        interpolation_points = self.hass.states.get(
-            "sensor.smartvanio_rs_4a0afc_sensor_1_interpolation_points"
-        ).state
+
+        if self.hass.states.get(f"{self._sensor_id}_interpolated_value") is None:
+            return raw_value
+
+        attributes = self.hass.states.get(
+            f"{self._sensor_id}_interpolated_value"
+        ).attributes
+
+        interpolation_points = attributes.get("interpolation_points")
+        interpolation_kind = attributes.get("interpolation_kind", "linear")
 
         if not interpolation_points:
-            print("Calibration data is empty")
             return raw_value
 
         points = json.loads(interpolation_points)
 
+        if len(points) < 2:
+            return raw_value
+
         sorted_points = sorted(points, key=lambda x: x[0])
-        x_vals, y_vals = zip(*sorted_points, strict=False)  # Unzip into separate lists
+        x_vals, y_vals = zip(*sorted_points, strict=False)
 
         interpolator = interp1d(
             x_vals,
             y_vals,
-            kind="linear",
+            kind=interpolation_kind,
             fill_value="extrapolate",  # Handle clamping internally
         )
 
@@ -255,7 +307,9 @@ class SmartVanInterpolatedSensor(SensorEntity):
         # Clamp to min/max y-values (for methods that might overshoot)
         y_min = min(y_vals)
         y_max = max(y_vals)
-        return max(min(interpolated, y_max), y_min)
+        result = max(min(interpolated, y_max), y_min)
+
+        return (int(10 * result - 0.5) + 1) / 10.0
 
     async def _async_sensor_state_changed(self, entity_id, old_state, new_state):
         """Handle state changes of the raw sensor."""
@@ -264,37 +318,3 @@ class SmartVanInterpolatedSensor(SensorEntity):
 
         # Force a state update
         self.async_schedule_update_ha_state()
-
-
-class SmartVanInterpolationPointsEntity(SensorEntity):
-    def __init__(self, hass, entry, sensor_id, device_info):
-        """Initialize the calibrated sensor."""
-        print("INITIALZED SMARTVAN INTERPOLATION", f"{sensor_id}_interpolation_points")
-
-        device_prefix = entry.title.replace("-", "_").lower()
-        sensor_id_with_prefix = f"{device_prefix}_{sensor_id}"
-
-        self.hass = hass
-        self.entry = entry
-        self._state = None
-        self._sensor_id = f"{sensor_id_with_prefix}_interpolation_points"
-        self._name = f"{sensor_id} Interpolation points"
-        self._attr_unique_id = f"{entry.entry_id}_interpolation_points"
-        self._device_info = device_info
-        self._attr_device_info = DeviceInfo(
-            connections={(dr.CONNECTION_NETWORK_MAC, "34:CD:B0:4A:0A:FC")}
-        )
-        self._state = "[[0, 1], [2, 20], [3, 40]]"
-
-    @property
-    def name(self):
-        return self._name
-
-    @property
-    def state(self):
-        return self._state
-
-    def set_value(self, new_value):
-        """Update the sensor state."""
-        self._state = new_value
-        self.async_write_ha_state()
