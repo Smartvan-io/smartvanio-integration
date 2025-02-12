@@ -67,19 +67,9 @@ async def async_setup_entry(
     if device_type == "smartvanio.resistive_sensor":
         # Create the calibrated sensor
         # This is the raw ESPHome sensor ID
-        interpolated_sensor_1 = SmartVanInterpolatedSensor(
-            hass,
-            entry,
-            "sensor_1",
-            device_info=entry.data.get("device_info"),
-        )
+        interpolated_sensor_1 = SmartVanInterpolatedSensor(hass, entry, "sensor_1")
 
-        interpolated_sensor_2 = SmartVanInterpolatedSensor(
-            hass,
-            entry,
-            "sensor_2",
-            device_info=entry.data.get("device_info"),
-        )
+        interpolated_sensor_2 = SmartVanInterpolatedSensor(hass, entry, "sensor_2")
 
         async_add_entities([interpolated_sensor_1, interpolated_sensor_2])
 
@@ -211,10 +201,11 @@ class EsphomeTextSensor(EsphomeEntity[TextSensorInfo, TextSensorState], SensorEn
 class SmartVanInterpolatedSensor(SensorEntity):
     """A sensor that applies calibration to a raw ESPHome sensor value."""
 
-    def __init__(self, hass, entry, sensor_id, device_info):
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry, sensor_id):
         """Initialize the calibrated sensor."""
 
         device_prefix = entry.title.replace("-", "_").lower()
+        device_info = entry.data.get("device_info")
         sensor_id_with_prefix = f"{device_prefix}_{sensor_id}"
         self.hass = hass
         self.entry = entry
@@ -227,11 +218,16 @@ class SmartVanInterpolatedSensor(SensorEntity):
         self.entity_id = f"sensor.{sensor_id_with_prefix}_interpolated_value"
         self._device_info = device_info
         self._attr_device_info = DeviceInfo(
-            connections={(dr.CONNECTION_NETWORK_MAC, "34:CD:B0:4A:0A:FC")}
+            connections={(dr.CONNECTION_NETWORK_MAC, device_info.mac_address)}
         )
+        self.device_class = "measurement"
+        self._attr_device_class = "measurement"
+        self._attr_unit_of_measurement = "%"
         async_track_state_change(
             hass, self._sensor_id, self._async_sensor_state_changed
         )
+
+        return None
 
     @property
     def name(self):
@@ -254,6 +250,7 @@ class SmartVanInterpolatedSensor(SensorEntity):
             "min_resistance": min_resistance,
             "max_resistance": max_resistance,
             "interpolation_points": interpolation_points,
+            "unit_of_measurement": self._attr_unit_of_measurement,
         }
 
     @property
@@ -265,10 +262,6 @@ class SmartVanInterpolatedSensor(SensorEntity):
             return None
 
         return self._interpolate(raw_state.state)
-
-    @property
-    def unit_of_measurement(self):
-        return self.entry.data.get("unit", "Custom")
 
     def _interpolate(self, raw_value):
         """Perform linear interpolation using calibration data."""
