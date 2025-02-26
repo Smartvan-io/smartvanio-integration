@@ -54,7 +54,7 @@ def async_static_info_updated(
     for info in infos:
         if not current_infos.pop(info.key, None):
             # Create new entity
-            entity = entity_type(entry_data, platform.domain, info, state_type)
+            entity = entity_type(entry_data, platform.domain, info, state_type, hass)
             add_entities.append(entity)
         new_infos[info.key] = info
 
@@ -199,6 +199,7 @@ class EsphomeEntity(Entity, Generic[_InfoT, _StateT]):
         domain: str,
         entity_info: EntityInfo,
         state_type: type[_StateT],
+        hass: HomeAssistant,
     ) -> None:
         """Initialize."""
         self._entry_data = entry_data
@@ -213,6 +214,7 @@ class EsphomeEntity(Entity, Generic[_InfoT, _StateT]):
         self._attr_device_info = DeviceInfo(
             connections={(dr.CONNECTION_NETWORK_MAC, device_info.mac_address)}
         )
+        self.hass = hass
         #
         # If `friendly_name` is set, we use the Friendly naming rules, if
         # `friendly_name` is not set we make an exception to the naming rules for

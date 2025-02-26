@@ -581,9 +581,7 @@ def _async_setup_device_registry(
         project_name = device_info.project_name.split(".")
         manufacturer = project_name[0]
         model = project_name[1]
-        sw_version = (
-            f"{device_info.project_version} (ESPHome {device_info.esphome_version})"
-        )
+        sw_version = f"{device_info.project_version}"
 
     suggested_area = None
     if device_info.suggested_area:

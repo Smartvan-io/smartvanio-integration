@@ -91,7 +91,7 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         """Step 2: Configure the resistive sensor module."""
         errors = {}
 
-        print(user_input)
+        print(self._device_info.mac_address)
 
         if user_input is not None:
             return self.async_create_entry(
@@ -125,7 +125,7 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
                         ],
                         "interpolation_points": "[]",
                     },
-                    "device_info": self._device_info,
+                    "mac_address": self._device_info.mac_address,
                 },
             )
 
@@ -356,6 +356,7 @@ class OptionsFlowHandler(OptionsFlow):
                     "port": self._port,
                     "password": self._password,
                     "noise_psk": self._noise_psk,
+                    "mac_address": self._device_info.mac_address,
                 },
             )
 
@@ -450,7 +451,7 @@ class OptionsFlowHandler(OptionsFlow):
         project_name = "smartvanio.resistive_sensor"
 
         if project_name == "smartvanio.inclinometer":
-            return await self.async_step_inclinometer()
+            return await self.async_step_inclinometer(user_input)
 
         if project_name == "smartvanio.resistive_sensor":
             return self.async_step_resistive_sensor(user_input)
