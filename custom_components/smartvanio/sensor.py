@@ -6,7 +6,6 @@ from scipy.interpolate import interp1d
 
 from datetime import date, datetime
 import json
-import logging
 import math
 
 from aioesphomeapi import (
@@ -41,9 +40,6 @@ from homeassistant.util.enum import try_parse_enum
 
 from .entity import EsphomeEntity, platform_async_setup_entry
 from .enum_mapper import EsphomeEnumMapper
-from .const import DOMAIN
-
-_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
@@ -66,21 +62,6 @@ async def async_setup_entry(
         entity_type=EsphomeTextSensor,
         state_type=TextSensorState,
     )
-
-    print("HELO")
-
-    # print(json.dumps(entry.__dict__, indent=2, default=str))
-
-    device_type = entry.data.get("device_type", "")
-    # if device_type == "smartvanio.resistive_sensor":
-
-    #     # Create the calibrated sensor
-    #     # This is the raw ESPHome sensor ID
-    #     interpolated_sensor_1 = SmartVanInterpolatedSensor(hass, entry, "sensor_1")
-
-    #     interpolated_sensor_2 = SmartVanInterpolatedSensor(hass, entry, "sensor_2")
-
-    #     async_add_entities([interpolated_sensor_1, interpolated_sensor_2])
 
 
 _STATE_CLASSES: EsphomeEnumMapper[EsphomeSensorStateClass, SensorStateClass | None] = (
@@ -139,17 +120,6 @@ class EsphomeSensor(EsphomeEntity[SensorInfo, SensorState], SensorEntity):
         @callback
         def _async_sensor_state_changed(event):
             """Handle state changes of the raw sensor."""
-            # if new_state is None or new_state.state in ["unknown", "unavailable"]:
-            #     return
-            # if (
-            #     (old_state := event.data["old_state"]) is None
-            #     or old_state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE)
-            #     or (new_state := event.data["new_state"]) is None
-            #     or new_state.state in (STATE_UNKNOWN, STATE_UNAVAILABLE)
-            # ):
-            #     return
-
-            # Force a state update
             self.async_schedule_update_ha_state()
 
         if self.entity_id.endswith("sensor_1_interpolated_value"):
