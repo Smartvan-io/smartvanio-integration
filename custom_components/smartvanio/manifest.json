@@ -20,9 +20,8 @@
     "custom_components.smartvanio"
   ],
   "mqtt": ["smartvanio/discover/#"],
-  "quality_scale": "platinum",
   "zeroconf": ["_smartvaniolib._tcp.local."],
-  "version": "0.1",
+  "version": "0.2",
   "requirements": [
     "aioesphomeapi>=26.0.0",
     "esphome-dashboard-api>=1.2.3",

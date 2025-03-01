@@ -5,17 +5,9 @@ from __future__ import annotations
 from collections import OrderedDict
 import logging
 from typing import Any
-import voluptuous as vol
-import json
 
-from aioesphomeapi import (
-    APIClient,
-    APIConnectionError,
-    DeviceInfo,
-    InvalidEncryptionKeyAPIError,
-    RequiresEncryptionAPIError,
-    ResolveAPIError,
-)
+from aioesphomeapi import APIClient, APIConnectionError, DeviceInfo, ResolveAPIError
+import voluptuous as vol
 
 from homeassistant.components import zeroconf
 from homeassistant.config_entries import (
@@ -26,17 +18,15 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PASSWORD, CONF_PORT
 from homeassistant.core import callback
-from homeassistant.helpers.device_registry import format_mac
 from homeassistant.data_entry_flow import section
+from homeassistant.helpers.device_registry import format_mac
 
 from .const import (
     CONF_ALLOW_SERVICE_CALLS,
     CONF_DEVICE_NAME,
     CONF_NOISE_PSK,
-    DEFAULT_ALLOW_SERVICE_CALLS,
     DEFAULT_NEW_CONFIG_ALLOW_ALLOW_SERVICE_CALLS,
     DOMAIN,
-    SENSOR_TYPES,
 )
 
 ERROR_REQUIRES_ENCRYPTION_KEY = "requires_encryption_key"
@@ -54,7 +44,7 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
 
     def __init__(self) -> None:
         """Initialize flow."""
-        self._host = "192.168.0.38"  #: str | None = None
+        self._host: str | None = None
         self._port: int | None = None
         self._device_info: DeviceInfo | None = None
         self._password: str | None = None
@@ -91,8 +81,6 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         """Step 2: Configure the resistive sensor module."""
         errors = {}
 
-        print(self._device_info.mac_address)
-
         if user_input is not None:
             return self.async_create_entry(
                 title=self._device_name,
@@ -106,23 +94,23 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
                     "sensor_1": {
                         # "type": user_input["sensor_1_type"],
                         "name": user_input["sensor_1"]["sensor_1_name"],
-                        "min_resistance": user_input["sensor_1"][
-                            "sensor_1_min_resistance"
-                        ],
-                        "max_resistance": user_input["sensor_1"][
-                            "sensor_1_max_resistance"
-                        ],
+                        # "min_resistance": user_input["sensor_1"][
+                        #     "sensor_1_min_resistance"
+                        # ],
+                        # "max_resistance": user_input["sensor_1"][
+                        #     "sensor_1_max_resistance"
+                        # ],
                         "interpolation_points": "[]",
                     },
                     "sensor_2": {
                         # "type": user_input["sensor_2_type"],
                         "name": user_input["sensor_2"]["sensor_2_name"],
-                        "min_resistance": user_input["sensor_2"][
-                            "sensor_2_min_resistance"
-                        ],
-                        "max_resistance": user_input["sensor_2"][
-                            "sensor_2_max_resistance"
-                        ],
+                        # "min_resistance": user_input["sensor_2"][
+                        #     "sensor_2_min_resistance"
+                        # ],
+                        # "max_resistance": user_input["sensor_2"][
+                        #     "sensor_2_max_resistance"
+                        # ],
                         "interpolation_points": "[]",
                     },
                     "mac_address": self._device_info.mac_address,
@@ -138,8 +126,6 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
                             # vol.Required("sensor_1_type", default="water_tank"): vol.In(
                             #     SENSOR_TYPES
                             # ),
-                            vol.Required("sensor_1_min_resistance", default=0): int,
-                            vol.Required("sensor_1_max_resistance", default=190): int,
                         }
                     )
                 ),
@@ -149,9 +135,7 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
                             vol.Required("sensor_2_name", default="Sensor 2"): str,
                             # vol.Required("sensor_2_type", default="water_tank"): vol.In(
                             #     SENSOR_TYPES
-                            # ),
-                            vol.Required("sensor_2_min_resistance", default=0): int,
-                            vol.Required("sensor_2_max_resistance", default=190): int,
+                            # )
                         }
                     )
                 ),
@@ -166,32 +150,17 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         """Step 2: Configure the inclinometer."""
         _LOGGER.warning("SmartVan: Entered async_step_inclinometer")
 
-        errors = {}
-
-        if user_input is not None:
-            return self.async_create_entry(
-                title=user_input["inclinometer_name"],
-                data={
-                    "device": self._device_name,
-                    "device_type": "smartvanio.inclinometer",
-                    "name": user_input["inclinometer_name"],
-                    "host": self._host,
-                    "port": self._port,
-                    "password": self._password,
-                    "noise_psk": self._noise_psk,
-                },
-            )
-
-        data_schema = vol.Schema(
-            {
-                vol.Required("inclinometer_name", default="Inclinometer"): str,
-            }
-        )
-
-        _LOGGER.warning("SmartVan: Displaying inclinometer config form")
-
-        return self.async_show_form(
-            step_id="inclinometer", data_schema=data_schema, errors=errors
+        return self.async_create_entry(
+            title=self._device_name,
+            data={
+                "device": self._device_name,
+                "device_type": "smartvanio.inclinometer",
+                "name": self._device_name,
+                "host": self._host,
+                "port": self._port,
+                "password": self._password,
+                "noise_psk": self._noise_psk,
+            },
         )
 
     async def async_step_user(
@@ -339,36 +308,7 @@ class OptionsFlowHandler(OptionsFlow):
     def __init__(self, config_entry: ConfigEntry) -> None:
         """Initialize options flow."""
         self.config_entry = config_entry
-        self._device_info: DeviceInfo | None = None
-
-    def async_step_inclinometer(self, user_input=None):
-        """Step 2: Configure the inclinometer."""
-        _LOGGER.warning("SmartVan: Entered async_step_inclinometer")
-
-        if user_input is not None:
-            return self.async_create_entry(
-                title=user_input["inclinometer_name"],
-                data={
-                    "device": self._device_name,
-                    "device_type": "smartvanio.inclinometer",
-                    "name": user_input["inclinometer_name"],
-                    "host": self._host,
-                    "port": self._port,
-                    "password": self._password,
-                    "noise_psk": self._noise_psk,
-                    "mac_address": self._device_info.mac_address,
-                },
-            )
-
-        data_schema = vol.Schema(
-            {
-                vol.Required("inclinometer_name", default="Inclinometer"): str,
-            }
-        )
-
-        _LOGGER.warning("SmartVan: Displaying inclinometer config form")
-
-        return self.async_show_form(step_id="init", data_schema=data_schema)
+        self.device_type: str = config_entry.data.get("device_type")
 
     def async_step_resistive_sensor(self, user_input=None):
         """Step 2: Configure the resistive sensor module."""
@@ -382,61 +322,50 @@ class OptionsFlowHandler(OptionsFlow):
             # 1) Copy the current options
 
             # # 2) Merge new sensor settings
-            current_options["sensor_1"] = {
-                "type": user_input["sensor_1_type"],
-                "name": user_input["sensor_1_name"],
-                "min_resistance": user_input["sensor_1_min_resistance"],
-                "max_resistance": user_input["sensor_1_max_resistance"],
+            data["sensor_1"] = {
+                # "type": user_input["sensor_1_type"],
+                "name": user_input["sensor_1"].get("sensor_1_name"),
             }
 
-            current_options["sensor_2"] = {
-                "type": user_input["sensor_2_type"],
-                "name": user_input["sensor_2_name"],
-                "min_resistance": user_input["sensor_2_min_resistance"],
-                "max_resistance": user_input["sensor_2_max_resistance"],
+            data["sensor_2"] = {
+                # "type": user_input["sensor_2_type"],
+                "name": user_input["sensor_2"].get("sensor_2_name"),
             }
 
             # 3) Return the merged dict so we don't lose existing options
             return self.async_create_entry(
-                title=self.config_entry.title,  # or an empty string
-                data=current_options,
+                data=data,
             )
 
         data_schema = vol.Schema(
             {
                 vol.Required("sensor_1"): section(
-                    {
-                        vol.Required(
-                            "sensor_1_name",
-                            default=data.get("sensor_1", {}).get("name", ""),
-                        ): str,
-                        vol.Required(
-                            "sensor_1_min_resistance",
-                            default=data.get("sensor_1", {}).get("min_resistance", 0),
-                        ): int,
-                        vol.Required(
-                            "sensor_1_max_resistance",
-                            default=data.get("sensor_1", {}).get("max_resistance", 190),
-                        ): int,
-                    },
-                    {"collapsed": False},
+                    vol.Schema(
+                        {
+                            vol.Required(
+                                "sensor_1_name",
+                                default=data["sensor_1"].get("name", "Sensor 1"),
+                            ): str,
+                            # vol.Required("sensor_1_type", default="water_tank"): vol.In(
+                            #     SENSOR_TYPES
+                            # ),
+                        }
+                    )
                 ),
                 vol.Required("sensor_2"): section(
-                    {
-                        vol.Required(
-                            "sensor_2_name",
-                            default=data.get("sensor_2", {}).get("name", ""),
-                        ): str,
-                        vol.Required(
-                            "sensor_2_min_resistance",
-                            default=data.get("sensor_2", {}).get("min_resistance", 0),
-                        ): int,
-                        vol.Required(
-                            "sensor_2_max_resistance",
-                            default=data.get("sensor_2", {}).get("max_resistance", 190),
-                        ): int,
-                    },
-                    {"collapsed": True},
+                    vol.Schema(
+                        {
+                            vol.Required(
+                                "sensor_2_name",
+                                default=data["sensor_2"].get("name", "Sensor 2"),
+                            ): str,
+                            # vol.Required("sensor_2_type", default="water_tank"): vol.In(
+                            #     SENSOR_TYPES
+                            # ),
+                            # vol.Required("sensor_2_min_resistance", default=0): int,
+                            # vol.Required("sensor_2_max_resistance", default=190): int,
+                        }
+                    )
                 ),
             }
         )
@@ -448,12 +377,10 @@ class OptionsFlowHandler(OptionsFlow):
     ) -> ConfigFlowResult:
         """Handle options flow."""
 
-        project_name = "smartvanio.resistive_sensor"
+        if self.device_type == "smartvanio.inclinometer":
+            return self.async_abort(reason="no_options_for_this_device")
 
-        if project_name == "smartvanio.inclinometer":
-            return await self.async_step_inclinometer(user_input)
-
-        if project_name == "smartvanio.resistive_sensor":
+        if self.device_type == "smartvanio.resistive_sensor":
             return self.async_step_resistive_sensor(user_input)
 
         return None
