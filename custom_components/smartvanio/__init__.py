@@ -1,7 +1,6 @@
 """Support for esphome devices."""
 
 from __future__ import annotations
-from typing import Any
 
 from aioesphomeapi import APIClient
 import voluptuous as vol
