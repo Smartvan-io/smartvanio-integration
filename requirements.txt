@@ -1,7 +1,11 @@
 colorlog==6.9.0
 pip>=8.0.3,<24.4
 ruff==0.8.6
-aioesphomeapi>=26.0.0,
-esphome-dashboard-api>=1.2.3,
-bleak-esphome>=1.0.0,
+# aioesphomeapi>=26.0.0,
+# esphome-dashboard-api>=1.2.3,
+# bleak-esphome>=1.0.0,
+# scipy>=1.10.1\
+aioesphomeapi>=29.3.2
+esphome-dashboard-api>=1.2.3
+bleak-esphome>=2.9.0
 scipy>=1.10.1

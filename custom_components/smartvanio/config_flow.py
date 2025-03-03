@@ -188,6 +188,8 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         # interact with the flow since it is expected to be a rare case.
         response = await self.fetch_device_info()
 
+        print(response)
+
         project_name = self._device_info.project_name
 
         if response is not None:

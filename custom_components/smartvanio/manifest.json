@@ -23,9 +23,9 @@
   "zeroconf": ["_smartvaniolib._tcp.local."],
   "version": "0.2",
   "requirements": [
-    "aioesphomeapi>=26.0.0",
-    "esphome-dashboard-api>=1.2.3",
-    "bleak-esphome>=1.0.0",
+    "aioesphomeapi==29.3.2",
+    "esphome-dashboard-api==1.2.3",
+    "bleak-esphome==2.9.0",
     "scipy>=1.10.1"
   ]
 }
