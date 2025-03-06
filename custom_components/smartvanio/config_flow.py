@@ -3,35 +3,54 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Mapping
+import json
 import logging
-from typing import Any
+from typing import Any, cast
 
-from aioesphomeapi import APIClient, APIConnectionError, DeviceInfo, ResolveAPIError
+from aioesphomeapi import (
+    APIClient,
+    APIConnectionError,
+    DeviceInfo,
+    InvalidAuthAPIError,
+    InvalidEncryptionKeyAPIError,
+    RequiresEncryptionAPIError,
+    ResolveAPIError,
+)
+import aiohttp
 import voluptuous as vol
 
 from homeassistant.components import zeroconf
 from homeassistant.config_entries import (
+    SOURCE_REAUTH,
     ConfigEntry,
     ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
 )
-from homeassistant.const import CONF_HOST, CONF_NAME, CONF_PASSWORD, CONF_PORT
+from homeassistant.const import CONF_HOST, CONF_PASSWORD, CONF_PORT
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import section
 from homeassistant.helpers.device_registry import format_mac
+from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
+from homeassistant.helpers.service_info.hassio import HassioServiceInfo
+from homeassistant.helpers.service_info.mqtt import MqttServiceInfo
+from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
+from homeassistant.util.json import json_loads_object
 
 from .const import (
     CONF_ALLOW_SERVICE_CALLS,
     CONF_DEVICE_NAME,
     CONF_NOISE_PSK,
+    CONF_SUBSCRIBE_LOGS,
+    DEFAULT_ALLOW_SERVICE_CALLS,
     DEFAULT_NEW_CONFIG_ALLOW_ALLOW_SERVICE_CALLS,
     DOMAIN,
 )
+from .dashboard import async_get_or_create_dashboard_manager, async_set_dashboard_info
 
 ERROR_REQUIRES_ENCRYPTION_KEY = "requires_encryption_key"
 ERROR_INVALID_ENCRYPTION_KEY = "invalid_psk"
-SMARTVANIO_URL = "https://www.smartvan.io"
+ESPHOME_URL = "https://esphome.io/"
 _LOGGER = logging.getLogger(__name__)
 
 ZERO_NOISE_PSK = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
@@ -42,14 +61,17 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    _reauth_entry: ConfigEntry
+
     def __init__(self) -> None:
         """Initialize flow."""
         self._host: str | None = None
+        self.__name: str | None = None
         self._port: int | None = None
-        self._device_info: DeviceInfo | None = None
         self._password: str | None = None
         self._noise_required: bool | None = None
         self._noise_psk: str | None = None
+        self._device_info: DeviceInfo | None = None
         # The ESPHome name as per its config
         self._device_name: str | None = None
 
@@ -58,13 +80,12 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         if user_input is not None:
             self._host = user_input[CONF_HOST]
-            self._port = 6053
-
+            self._port = user_input[CONF_PORT]
             return await self._async_try_fetch_device_info()
 
         fields: dict[Any, type] = OrderedDict()
         fields[vol.Required(CONF_HOST, default=self._host or vol.UNDEFINED)] = str
-        # fields[vol.Optional(CONF_PORT, default=self._port or 6053)] = int
+        fields[vol.Optional(CONF_PORT, default=self._port or 6053)] = int
 
         errors = {}
         if error is not None:
@@ -74,93 +95,7 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=vol.Schema(fields),
             errors=errors,
-            description_placeholders={"smartvanio_url": SMARTVANIO_URL},
-        )
-
-    async def async_step_resistive_sensor(self, user_input=None):
-        """Step 2: Configure the resistive sensor module."""
-        errors = {}
-
-        if user_input is not None:
-            return self.async_create_entry(
-                title=self._device_name,
-                data={
-                    "device": self._device_name,
-                    "device_type": "smartvanio.resistive_sensor",
-                    "host": self._host,
-                    "port": self._port,
-                    "password": self._password,
-                    "noise_psk": self._noise_psk,
-                    "sensor_1": {
-                        # "type": user_input["sensor_1_type"],
-                        "name": user_input["sensor_1"]["sensor_1_name"],
-                        # "min_resistance": user_input["sensor_1"][
-                        #     "sensor_1_min_resistance"
-                        # ],
-                        # "max_resistance": user_input["sensor_1"][
-                        #     "sensor_1_max_resistance"
-                        # ],
-                        "interpolation_points": "[]",
-                    },
-                    "sensor_2": {
-                        # "type": user_input["sensor_2_type"],
-                        "name": user_input["sensor_2"]["sensor_2_name"],
-                        # "min_resistance": user_input["sensor_2"][
-                        #     "sensor_2_min_resistance"
-                        # ],
-                        # "max_resistance": user_input["sensor_2"][
-                        #     "sensor_2_max_resistance"
-                        # ],
-                        "interpolation_points": "[]",
-                    },
-                    "mac_address": self._device_info.mac_address,
-                },
-            )
-
-        data_schema = vol.Schema(
-            {
-                vol.Required("sensor_1"): section(
-                    vol.Schema(
-                        {
-                            vol.Required("sensor_1_name", default="Sensor 1"): str,
-                            # vol.Required("sensor_1_type", default="water_tank"): vol.In(
-                            #     SENSOR_TYPES
-                            # ),
-                        }
-                    )
-                ),
-                vol.Required("sensor_2"): section(
-                    vol.Schema(
-                        {
-                            vol.Required("sensor_2_name", default="Sensor 2"): str,
-                            # vol.Required("sensor_2_type", default="water_tank"): vol.In(
-                            #     SENSOR_TYPES
-                            # )
-                        }
-                    )
-                ),
-            }
-        )
-
-        return self.async_show_form(
-            step_id="resistive_sensor", data_schema=data_schema, errors=errors
-        )
-
-    async def async_step_inclinometer(self, user_input=None):
-        """Step 2: Configure the inclinometer."""
-        _LOGGER.warning("SmartVan: Entered async_step_inclinometer")
-
-        return self.async_create_entry(
-            title=self._device_name,
-            data={
-                "device": self._device_name,
-                "device_type": "smartvanio.inclinometer",
-                "name": self._device_name,
-                "host": self._host,
-                "port": self._port,
-                "password": self._password,
-                "noise_psk": self._noise_psk,
-            },
+            description_placeholders={"esphome_url": ESPHOME_URL},
         )
 
     async def async_step_user(
@@ -169,38 +104,115 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         """Handle a flow initialized by the user."""
         return await self._async_step_user_base(user_input=user_input)
 
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        """Handle a flow initialized by a reauth event."""
+        self._reauth_entry = self._get_reauth_entry()
+        self._host = entry_data[CONF_HOST]
+        self._port = entry_data[CONF_PORT]
+        self._password = entry_data[CONF_PASSWORD]
+        self._name = self._reauth_entry.title
+        self._device_name = entry_data.get(CONF_DEVICE_NAME)
+
+        # Device without encryption allows fetching device info. We can then check
+        # if the device is no longer using a password. If we did try with a password,
+        # we know setting password to empty will allow us to authenticate.
+        error = await self.fetch_device_info()
+        if (
+            error is None
+            and self._password
+            and self._device_info
+            and not self._device_info.uses_password
+        ):
+            self._password = ""
+            return await self._async_authenticate_or_add()
+
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle reauthorization flow."""
+        errors = {}
+
+        if await self._retrieve_encryption_key_from_dashboard():
+            error = await self.fetch_device_info()
+            if error is None:
+                return await self._async_authenticate_or_add()
+
+        if user_input is not None:
+            self._noise_psk = user_input[CONF_NOISE_PSK]
+            error = await self.fetch_device_info()
+            if error is None:
+                return await self._async_authenticate_or_add()
+            errors["base"] = error
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({vol.Required(CONF_NOISE_PSK): str}),
+            errors=errors,
+            description_placeholders={"name": self._name},
+        )
+
     @property
-    def _name(self) -> str | None:
-        return self.context.get(CONF_NAME)
+    def _name(self) -> str:
+        return self.__name or "ESPHome"
 
     @_name.setter
     def _name(self, value: str) -> None:
-        self.context[CONF_NAME] = value
+        self.__name = value
         self.context["title_placeholders"] = {"name": self._name}
 
     async def _async_try_fetch_device_info(self) -> ConfigFlowResult:
         """Try to fetch device info and return any errors."""
         response: str | None
-        # After 2024.08, stop trying to fetch device info without encryption
-        # so we can avoid probe requests to check for password. At this point
-        # most devices should announce encryption support and password is
-        # deprecated and can be discovered by trying to connect only after they
-        # interact with the flow since it is expected to be a rare case.
-        response = await self.fetch_device_info()
+        if self._noise_required:
+            # If we already know we need encryption, don't try to fetch device info
+            # without encryption.
+            response = ERROR_REQUIRES_ENCRYPTION_KEY
+        else:
+            # After 2024.08, stop trying to fetch device info without encryption
+            # so we can avoid probe requests to check for password. At this point
+            # most devices should announce encryption support and password is
+            # deprecated and can be discovered by trying to connect only after they
+            # interact with the flow since it is expected to be a rare case.
+            response = await self.fetch_device_info()
 
-        print(response)
+        if response == ERROR_REQUIRES_ENCRYPTION_KEY:
+            if not self._device_name and not self._noise_psk:
+                # If device name is not set we can send a zero noise psk
+                # to get the device name which will allow us to populate
+                # the device name and hopefully get the encryption key
+                # from the dashboard.
+                self._noise_psk = ZERO_NOISE_PSK
+                response = await self.fetch_device_info()
+                self._noise_psk = None
 
-        project_name = self._device_info.project_name
+            if (
+                self._device_name
+                and await self._retrieve_encryption_key_from_dashboard()
+            ):
+                response = await self.fetch_device_info()
 
+            # If the fetched key is invalid, unset it again.
+            if response == ERROR_INVALID_ENCRYPTION_KEY:
+                self._noise_psk = None
+                response = ERROR_REQUIRES_ENCRYPTION_KEY
+
+        if response == ERROR_REQUIRES_ENCRYPTION_KEY:
+            return await self.async_step_encryption_key()
         if response is not None:
             return await self._async_step_user_base(error=response)
+        return await self._async_authenticate_or_add()
 
-        if project_name == "smartvanio.inclinometer":
-            return await self.async_step_inclinometer()
+    async def _async_authenticate_or_add(self) -> ConfigFlowResult:
+        # Only show authentication step if device uses password
+        assert self._device_info is not None
+        if self._device_info.uses_password:
+            return await self.async_step_authenticate()
 
-        if project_name == "smartvanio.resistive_sensor":
-            return await self.async_step_resistive_sensor()
-
+        self._password = ""
         return self._async_get_entry()
 
     async def async_step_discovery_confirm(
@@ -214,7 +226,7 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         )
 
     async def async_step_zeroconf(
-        self, discovery_info: zeroconf.ZeroconfServiceInfo
+        self, discovery_info: ZeroconfServiceInfo
     ) -> ConfigFlowResult:
         """Handle zeroconf discovery."""
         mac_address: str | None = discovery_info.properties.get("mac")
@@ -244,6 +256,67 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
 
         return await self.async_step_discovery_confirm()
 
+    async def async_step_mqtt(
+        self, discovery_info: MqttServiceInfo
+    ) -> ConfigFlowResult:
+        """Handle MQTT discovery."""
+        if not discovery_info.payload:
+            return self.async_abort(reason="mqtt_missing_payload")
+
+        device_info = json_loads_object(discovery_info.payload)
+        if "mac" not in device_info:
+            return self.async_abort(reason="mqtt_missing_mac")
+
+        # there will be no port if the API is not enabled
+        if "port" not in device_info:
+            return self.async_abort(reason="mqtt_missing_api")
+
+        if "ip" not in device_info:
+            return self.async_abort(reason="mqtt_missing_ip")
+
+        # mac address is lowercase and without :, normalize it
+        unformatted_mac = cast(str, device_info["mac"])
+        mac_address = format_mac(unformatted_mac)
+
+        device_name = cast(str, device_info["name"])
+
+        self._device_name = device_name
+        self._name = cast(str, device_info.get("friendly_name", device_name))
+        self._host = cast(str, device_info["ip"])
+        self._port = cast(int, device_info["port"])
+
+        self._noise_required = "api_encryption" in device_info
+
+        # Check if already configured
+        await self.async_set_unique_id(mac_address)
+        self._abort_if_unique_id_configured(
+            updates={CONF_HOST: self._host, CONF_PORT: self._port}
+        )
+
+        return await self.async_step_discovery_confirm()
+
+    async def async_step_dhcp(
+        self, discovery_info: DhcpServiceInfo
+    ) -> ConfigFlowResult:
+        """Handle DHCP discovery."""
+        await self.async_set_unique_id(format_mac(discovery_info.macaddress))
+        self._abort_if_unique_id_configured(updates={CONF_HOST: discovery_info.ip})
+        # This should never happen since we only listen to DHCP requests
+        # for configured devices.
+        return self.async_abort(reason="already_configured")
+
+    async def async_step_hassio(
+        self, discovery_info: HassioServiceInfo
+    ) -> ConfigFlowResult:
+        """Handle Supervisor service discovery."""
+        await async_set_dashboard_info(
+            self.hass,
+            discovery_info.slug,
+            discovery_info.config["host"],
+            discovery_info.config["port"],
+        )
+        return self.async_abort(reason="service_received")
+
     @callback
     def _async_get_entry(self) -> ConfigFlowResult:
         config_data = {
@@ -257,12 +330,57 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         config_options = {
             CONF_ALLOW_SERVICE_CALLS: DEFAULT_NEW_CONFIG_ALLOW_ALLOW_SERVICE_CALLS,
         }
+        if self.source == SOURCE_REAUTH:
+            return self.async_update_reload_and_abort(
+                self._reauth_entry, data=self._reauth_entry.data | config_data
+            )
 
         assert self._name is not None
         return self.async_create_entry(
             title=self._name,
             data=config_data,
             options=config_options,
+        )
+
+    async def async_step_encryption_key(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Handle getting psk for transport encryption."""
+        errors = {}
+        if user_input is not None:
+            self._noise_psk = user_input[CONF_NOISE_PSK]
+            error = await self.fetch_device_info()
+            if error is None:
+                return await self._async_authenticate_or_add()
+            errors["base"] = error
+
+        return self.async_show_form(
+            step_id="encryption_key",
+            data_schema=vol.Schema({vol.Required(CONF_NOISE_PSK): str}),
+            errors=errors,
+            description_placeholders={"name": self._name},
+        )
+
+    async def async_step_authenticate(
+        self, user_input: dict[str, Any] | None = None, error: str | None = None
+    ) -> ConfigFlowResult:
+        """Handle getting password for authentication."""
+        if user_input is not None:
+            self._password = user_input[CONF_PASSWORD]
+            error = await self.try_login()
+            if error:
+                return await self.async_step_authenticate(error=error)
+            return self._async_get_entry()
+
+        errors = {}
+        if error is not None:
+            errors["base"] = error
+
+        return self.async_show_form(
+            step_id="authenticate",
+            data_schema=vol.Schema({vol.Required("password"): str}),
+            description_placeholders={"name": self._name},
+            errors=errors,
         )
 
     async def fetch_device_info(self) -> str | None:
@@ -281,6 +399,13 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         try:
             await cli.connect()
             self._device_info = await cli.device_info()
+        except RequiresEncryptionAPIError:
+            return ERROR_REQUIRES_ENCRYPTION_KEY
+        except InvalidEncryptionKeyAPIError as ex:
+            if ex.received_name:
+                self._device_name = ex.received_name
+                self._name = ex.received_name
+            return ERROR_INVALID_ENCRYPTION_KEY
         except ResolveAPIError:
             return "resolve_error"
         except APIConnectionError:
@@ -292,8 +417,70 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         self._device_name = self._device_info.name
         mac_address = format_mac(self._device_info.mac_address)
         await self.async_set_unique_id(mac_address, raise_on_progress=False)
+        if self.source != SOURCE_REAUTH:
+            self._abort_if_unique_id_configured(
+                updates={CONF_HOST: self._host, CONF_PORT: self._port}
+            )
 
         return None
+
+    async def try_login(self) -> str | None:
+        """Try logging in to device and return any errors."""
+        zeroconf_instance = await zeroconf.async_get_instance(self.hass)
+        assert self._host is not None
+        assert self._port is not None
+        cli = APIClient(
+            self._host,
+            self._port,
+            self._password,
+            zeroconf_instance=zeroconf_instance,
+            noise_psk=self._noise_psk,
+        )
+
+        try:
+            await cli.connect(login=True)
+        except InvalidAuthAPIError:
+            return "invalid_auth"
+        except APIConnectionError:
+            return "connection_error"
+        finally:
+            await cli.disconnect(force=True)
+
+        return None
+
+    async def _retrieve_encryption_key_from_dashboard(self) -> bool:
+        """Try to retrieve the encryption key from the dashboard.
+
+        Return boolean if a key was retrieved.
+        """
+        if (
+            self._device_name is None
+            or (manager := await async_get_or_create_dashboard_manager(self.hass))
+            is None
+            or (dashboard := manager.async_get()) is None
+        ):
+            return False
+
+        await dashboard.async_request_refresh()
+        if not dashboard.last_update_success:
+            return False
+
+        device = dashboard.data.get(self._device_name)
+
+        if device is None:
+            return False
+
+        try:
+            noise_psk = await dashboard.api.get_encryption_key(device["configuration"])
+        except aiohttp.ClientError as err:
+            _LOGGER.error("Error talking to the dashboard: %s", err)
+            return False
+        except json.JSONDecodeError:
+            _LOGGER.exception("Error parsing response from dashboard")
+            return False
+
+        self._noise_psk = noise_psk
+        return True
 
     @staticmethod
     @callback
@@ -301,88 +488,31 @@ class EsphomeFlowHandler(ConfigFlow, domain=DOMAIN):
         config_entry: ConfigEntry,
     ) -> OptionsFlowHandler:
         """Get the options flow for this handler."""
-        return OptionsFlowHandler(config_entry)
+        return OptionsFlowHandler()
 
 
 class OptionsFlowHandler(OptionsFlow):
     """Handle a option flow for esphome."""
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        """Initialize options flow."""
-        self.config_entry = config_entry
-        self.device_type: str = config_entry.data.get("device_type")
-
-    def async_step_resistive_sensor(self, user_input=None):
-        """Step 2: Configure the resistive sensor module."""
-
-        data = dict(self.config_entry.data)
-        current_options = dict(self.config_entry.options)
-
-        data.update(current_options)
-
-        if user_input is not None:
-            # 1) Copy the current options
-
-            # # 2) Merge new sensor settings
-            data["sensor_1"] = {
-                # "type": user_input["sensor_1_type"],
-                "name": user_input["sensor_1"].get("sensor_1_name"),
-            }
-
-            data["sensor_2"] = {
-                # "type": user_input["sensor_2_type"],
-                "name": user_input["sensor_2"].get("sensor_2_name"),
-            }
-
-            # 3) Return the merged dict so we don't lose existing options
-            return self.async_create_entry(
-                data=data,
-            )
-
-        data_schema = vol.Schema(
-            {
-                vol.Required("sensor_1"): section(
-                    vol.Schema(
-                        {
-                            vol.Required(
-                                "sensor_1_name",
-                                default=data["sensor_1"].get("name", "Sensor 1"),
-                            ): str,
-                            # vol.Required("sensor_1_type", default="water_tank"): vol.In(
-                            #     SENSOR_TYPES
-                            # ),
-                        }
-                    )
-                ),
-                vol.Required("sensor_2"): section(
-                    vol.Schema(
-                        {
-                            vol.Required(
-                                "sensor_2_name",
-                                default=data["sensor_2"].get("name", "Sensor 2"),
-                            ): str,
-                            # vol.Required("sensor_2_type", default="water_tank"): vol.In(
-                            #     SENSOR_TYPES
-                            # ),
-                            # vol.Required("sensor_2_min_resistance", default=0): int,
-                            # vol.Required("sensor_2_max_resistance", default=190): int,
-                        }
-                    )
-                ),
-            }
-        )
-
-        return self.async_show_form(step_id="init", data_schema=data_schema)
-
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Handle options flow."""
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
 
-        if self.device_type == "smartvanio.inclinometer":
-            return self.async_abort(reason="no_options_for_this_device")
-
-        if self.device_type == "smartvanio.resistive_sensor":
-            return self.async_step_resistive_sensor(user_input)
-
-        return None
+        data_schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_ALLOW_SERVICE_CALLS,
+                    default=self.config_entry.options.get(
+                        CONF_ALLOW_SERVICE_CALLS, DEFAULT_ALLOW_SERVICE_CALLS
+                    ),
+                ): bool,
+                vol.Required(
+                    CONF_SUBSCRIBE_LOGS,
+                    default=self.config_entry.options.get(CONF_SUBSCRIBE_LOGS, False),
+                ): bool,
+            }
+        )
+        return self.async_show_form(step_id="init", data_schema=data_schema)

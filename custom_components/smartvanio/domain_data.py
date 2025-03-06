@@ -6,8 +6,6 @@ from dataclasses import dataclass, field
 from functools import cache
 from typing import Self
 
-from bleak_esphome.backend.cache import ESPHomeBluetoothCache
-
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.json import JSONEncoder
 
@@ -22,9 +20,6 @@ class DomainData:
     """Define a class that stores global esphome data in hass.data[DOMAIN]."""
 
     _stores: dict[str, ESPHomeStorage] = field(default_factory=dict)
-    bluetooth_cache: ESPHomeBluetoothCache = field(
-        default_factory=ESPHomeBluetoothCache
-    )
 
     def get_entry_data(self, entry: ESPHomeConfigEntry) -> RuntimeEntryData:
         """Return the runtime entry data associated with this config entry.
@@ -40,7 +35,7 @@ class DomainData:
         return self._stores.setdefault(
             entry.entry_id,
             ESPHomeStorage(
-                hass, STORAGE_VERSION, f"esphome.{entry.entry_id}", encoder=JSONEncoder
+                hass, STORAGE_VERSION, f"smartvanio.{entry.entry_id}", encoder=JSONEncoder
             ),
         )
 

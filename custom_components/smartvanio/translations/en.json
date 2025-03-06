@@ -7,43 +7,18 @@
       "mqtt_missing_api": "Missing API port in MQTT properties.",
       "mqtt_missing_ip": "Missing IP address in MQTT properties.",
       "mqtt_missing_mac": "Missing MAC address in MQTT properties.",
+      "mqtt_missing_payload": "Missing MQTT Payload.",
       "reauth_successful": "Re-authentication was successful",
       "service_received": "Action received"
     },
     "error": {
-      "connection_error": "Can't connect to ESP. Please make sure your YAML file contains an 'api:' line.",
+      "connection_error": "Can't connect to SmartVan.io module. Please make sure your YAML file contains an 'api:' line.",
       "invalid_auth": "Invalid authentication",
       "invalid_psk": "The transport encryption key is invalid. Please ensure it matches what you have in your configuration",
-      "resolve_error": "Can't resolve address of the ESP. If this error persists, please set a static IP address"
+      "resolve_error": "Can't resolve address of the SmartVan.io module. If this error persists, please set a static IP address"
     },
     "flow_title": "{name}",
     "step": {
-      "inclinometer": {
-        "data": {
-          "inclinometer_name": "Name"
-        },
-        "description": "Configure your inclinometer"
-      },
-      "resistive_sensor": {
-        "sections": {
-          "sensor_1": {
-            "name": "Sensor 1",
-            "data": {
-              "sensor_1_name": "Name",
-              "sensor_1_min_resistance": "Minimum resistance",
-              "sensor_1_max_resistance": "Maximum resistance"
-            }
-          },
-          "sensor_2": {
-            "name": "Sensor 2",
-            "data": {
-              "sensor_2_name": "Name",
-              "sensor_2_min_resistance": "Minimum resistance",
-              "sensor_2_max_resistance": "Maximum resistance"
-            }
-          }
-        }
-      },
       "authenticate": {
         "data": {
           "password": "Password"
@@ -51,31 +26,36 @@
         "description": "Please enter the password you set in your configuration for {name}."
       },
       "discovery_confirm": {
-        "description": "Do you want to add the SmartVan.io module `{name}` to Home Assistant?",
-        "title": "Discovered SmartVan.io module"
+        "description": "Do you want to add the SmartVan.io node `{name}` to Home Assistant?",
+        "title": "Discovered SmartVan.io node"
       },
       "encryption_key": {
         "data": {
           "noise_psk": "Encryption key"
         },
-        "description": "Please enter the encryption key for {name}. You can find it in the ESPHome Dashboard or in your device configuration."
+        "description": "Please enter the encryption key for {name}. You can find it in the SmartVan.io Dashboard or in your device configuration."
       },
       "reauth_confirm": {
         "data": {
           "noise_psk": "Encryption key"
         },
-        "description": "The SmartVan.io module {name} enabled transport encryption or changed the encryption key. Please enter the updated key. You can find it in the ESPHome Dashboard or in your device configuration."
+        "description": "The SmartVan.io device {name} enabled transport encryption or changed the encryption key. Please enter the updated key. You can find it in the smartvanio Dashboard or in your device configuration."
       },
       "user": {
         "data": {
           "host": "Host",
           "port": "Port"
         },
-        "description": "Please enter connection settings of your [SmartVan.io]({smartvanio_url}) node."
+        "description": "Please enter connection settings of your [smartvanio]({esphome_url}) node."
       }
     }
   },
   "entity": {
+    "assist_satellite": {
+      "assist_satellite": {
+        "name": "Assist satellite"
+      }
+    },
     "binary_sensor": {
       "assist_in_progress": {
         "name": "Assist in progress"
@@ -94,7 +74,7 @@
     },
     "select": {
       "pipeline": {
-        "name": "Assist pipeline",
+        "name": "Assistant",
         "state": {
           "preferred": "Preferred"
         }
@@ -106,12 +86,18 @@
           "default": "Default",
           "relaxed": "Relaxed"
         }
+      },
+      "wake_word": {
+        "name": "Wake word",
+        "state": {
+          "okay_nabu": "Okay Nabu"
+        }
       }
     }
   },
   "issues": {
     "api_password_deprecated": {
-      "description": "The API password for ESPHome is deprecated and the use of an API encryption key is recommended instead.\n\nRemove the API password and add an encryption key to your ESPHome device to resolve this issue.",
+      "description": "The API password for the device is deprecated and the use of an API encryption key is recommended instead.\n\nRemove the API password and add an encryption key to your smartvanio device to resolve this issue.",
       "title": "API Password deprecated on {name}"
     },
     "assist_in_progress_deprecated": {
@@ -125,34 +111,20 @@
       "title": "{integration_name} in progress binary sensors are deprecated"
     },
     "ble_firmware_outdated": {
-      "description": "To improve Bluetooth reliability and performance, we highly recommend updating {name} with ESPHome {version} or later. When updating the device from ESPHome earlier than 2022.12.0, it is recommended to use a serial cable instead of an over-the-air update to take advantage of the new partition scheme.",
-      "title": "Update {name} with ESPHome {version} or later"
+      "description": "To improve Bluetooth reliability and performance, we highly recommend updating {name} with smartvanio {version} or later. When updating the device from smartvanio earlier than 2022.12.0, it is recommended to use a serial cable instead of an over-the-air update to take advantage of the new partition scheme.",
+      "title": "Update {name} with smartvanio {version} or later"
     },
     "service_calls_not_allowed": {
-      "description": "The ESPHome device attempted to perform a Home Assistant action, but this functionality is not enabled.\n\nIf you trust this device and want to allow it to perfom Home Assistant action, you can enable this functionality in the options flow.",
+      "description": "The smartvanio device attempted to perform a Home Assistant action, but this functionality is not enabled.\n\nIf you trust this device and want to allow it to perform Home Assistant action, you can enable this functionality in the options flow.",
       "title": "{name} is not permitted to perform Home Assistant actions"
     }
   },
   "options": {
     "step": {
       "init": {
-        "sections": {
-          "sensor_1": {
-            "name": "Sensor 1",
-            "data": {
-              "sensor_1_name": "Name",
-              "sensor_1_min_resistance": "Minimum resistance",
-              "sensor_1_max_resistance": "Maximum resistance"
-            }
-          },
-          "sensor_2": {
-            "name": "Sensor 2",
-            "data": {
-              "sensor_2_name": "Name",
-              "sensor_2_min_resistance": "Minimum resistance",
-              "sensor_2_max_resistance": "Maximum resistance"
-            }
-          }
+        "data": {
+          "allow_service_calls": "Allow the device to perform Home Assistant actions.",
+          "subscribe_logs": "Subscribe to logs from the device. When enabled, the device will send logs to Home Assistant and you can view them in the logs panel."
         }
       }
     }

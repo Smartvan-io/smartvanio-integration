@@ -6,6 +6,7 @@ from aioesphomeapi import APIClient
 import voluptuous as vol
 
 from homeassistant.components import ffmpeg, websocket_api, zeroconf
+from homeassistant.components.bluetooth import async_remove_scanner
 from homeassistant.const import (
     CONF_HOST,
     CONF_PASSWORD,
@@ -13,10 +14,10 @@ from homeassistant.const import (
     __version__ as ha_version,
 )
 from homeassistant.core import HomeAssistant, callback
-import homeassistant.helpers.config_validation as cv
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 
-from .const import CONF_NOISE_PSK, DATA_FFMPEG_PROXY, DOMAIN
+from .const import CONF_BLUETOOTH_MAC_ADDRESS, CONF_NOISE_PSK, DATA_FFMPEG_PROXY, DOMAIN
 from .dashboard import async_setup as async_setup_dashboard
 from .domain_data import DomainData
 
@@ -47,17 +48,11 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     hass.http.register_view(
         FFmpegProxyView(ffmpeg.get_ffmpeg_manager(hass), proxy_data)
     )
-
-    websocket_api.async_register_command(
-        hass, websocket_handle_get_resistive_sensor_config
-    )
-
     return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
     """Set up the esphome component."""
-
     host: str = entry.data[CONF_HOST]
     port: int = entry.data[CONF_PORT]
     password: str | None = entry.data[CONF_PASSWORD]
@@ -77,7 +72,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> b
     domain_data = DomainData.get(hass)
     entry_data = RuntimeEntryData(
         client=cli,
-        entry_id=f"{entry.entry_id}",
+        entry_id=entry.entry_id,
         title=entry.title,
         store=domain_data.get_or_create_store(hass, entry),
         original_options=dict(entry.options),
@@ -102,6 +97,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> None:
     """Remove an esphome config entry."""
+    if bluetooth_mac_address := entry.data.get(CONF_BLUETOOTH_MAC_ADDRESS):
+        async_remove_scanner(hass, bluetooth_mac_address.upper())
     await DomainData.get(hass).get_or_create_store(hass, entry).async_remove()
 
 

@@ -8,10 +8,11 @@
       "service_received": "Action received",
       "mqtt_missing_mac": "Missing MAC address in MQTT properties.",
       "mqtt_missing_api": "Missing API port in MQTT properties.",
-      "mqtt_missing_ip": "Missing IP address in MQTT properties."
+      "mqtt_missing_ip": "Missing IP address in MQTT properties.",
+      "mqtt_missing_payload": "Missing MQTT Payload."
     },
     "error": {
-      "resolve_error": "Can't resolve address of the SmartVan.io module. If this error persists, please set a static IP address",
+      "resolve_error": "Can't resolve address of the ESP. If this error persists, please set a static IP address",
       "connection_error": "Can't connect to ESP. Please make sure your YAML file contains an 'api:' line.",
       "invalid_auth": "[%key:common::config_flow::error::invalid_auth%]",
       "invalid_psk": "The transport encryption key is invalid. Please ensure it matches what you have in your configuration"
@@ -22,7 +23,7 @@
           "host": "[%key:common::config_flow::data::host%]",
           "port": "[%key:common::config_flow::data::port%]"
         },
-        "description": "Please enter connection settings of your [SmartVan.io]({smartvanio_url}) node."
+        "description": "Please enter connection settings of your [smartvanio]({esphome_url}) node."
       },
       "authenticate": {
         "data": {
@@ -34,17 +35,17 @@
         "data": {
           "noise_psk": "Encryption key"
         },
-        "description": "Please enter the encryption key for {name}. You can find it in the ESPHome Dashboard or in your device configuration."
+        "description": "Please enter the encryption key for {name}. You can find it in the smartvanio Dashboard or in your device configuration."
       },
       "reauth_confirm": {
         "data": {
           "noise_psk": "[%key:component::esphome::config::step::encryption_key::data::noise_psk%]"
         },
-        "description": "The SmartVan.io device {name} enabled transport encryption or changed the encryption key. Please enter the updated key. You can find it in the SmartVan.io Dashboard or in your device configuration."
+        "description": "The smartvanio device {name} enabled transport encryption or changed the encryption key. Please enter the updated key. You can find it in the smartvanio Dashboard or in your device configuration."
       },
       "discovery_confirm": {
-        "description": "Do you want to add the SmartVan.io module `{name}` to Home Assistant?",
-        "title": "Discovered SmartVan.io module"
+        "description": "Do you want to add the smartvanio node `{name}` to Home Assistant?",
+        "title": "Discovered smartvanio node"
       }
     },
     "flow_title": "{name}"
@@ -53,12 +54,18 @@
     "step": {
       "init": {
         "data": {
-          "allow_service_calls": "Allow the device to perform Home Assistant actions."
+          "allow_service_calls": "Allow the device to perform Home Assistant actions.",
+          "subscribe_logs": "Subscribe to logs from the device. When enabled, the device will send logs to Home Assistant and you can view them in the logs panel."
         }
       }
     }
   },
   "entity": {
+    "assist_satellite": {
+      "assist_satellite": {
+        "name": "[%key:component::assist_satellite::entity_component::_::name%]"
+      }
+    },
     "binary_sensor": {
       "assist_in_progress": {
         "name": "[%key:component::assist_pipeline::entity::binary_sensor::assist_in_progress::name%]"
@@ -77,6 +84,12 @@
           "default": "[%key:component::assist_pipeline::entity::select::vad_sensitivity::state::default%]",
           "aggressive": "[%key:component::assist_pipeline::entity::select::vad_sensitivity::state::aggressive%]",
           "relaxed": "[%key:component::assist_pipeline::entity::select::vad_sensitivity::state::relaxed%]"
+        }
+      },
+      "wake_word": {
+        "name": "Wake word",
+        "state": {
+          "okay_nabu": "Okay Nabu"
         }
       }
     },
@@ -104,16 +117,16 @@
       }
     },
     "ble_firmware_outdated": {
-      "title": "Update {name} with ESPHome {version} or later",
-      "description": "To improve Bluetooth reliability and performance, we highly recommend updating {name} with ESPHome {version} or later. When updating the device from ESPHome earlier than 2022.12.0, it is recommended to use a serial cable instead of an over-the-air update to take advantage of the new partition scheme."
+      "title": "Update {name} with smartvanio {version} or later",
+      "description": "To improve Bluetooth reliability and performance, we highly recommend updating {name} with smartvanio {version} or later. When updating the device from smartvanio earlier than 2022.12.0, it is recommended to use a serial cable instead of an over-the-air update to take advantage of the new partition scheme."
     },
     "api_password_deprecated": {
       "title": "API Password deprecated on {name}",
-      "description": "The API password for SmartVan.io is deprecated and the use of an API encryption key is recommended instead.\n\nRemove the API password and add an encryption key to your SmartVan.io device to resolve this issue."
+      "description": "The API password for smartvanio is deprecated and the use of an API encryption key is recommended instead.\n\nRemove the API password and add an encryption key to your smartvanio device to resolve this issue."
     },
     "service_calls_not_allowed": {
       "title": "{name} is not permitted to perform Home Assistant actions",
-      "description": "The SmartVan.io device attempted to perform a Home Assistant action, but this functionality is not enabled.\n\nIf you trust this device and want to allow it to perfom Home Assistant action, you can enable this functionality in the options flow."
+      "description": "The smartvanio device attempted to perform a Home Assistant action, but this functionality is not enabled.\n\nIf you trust this device and want to allow it to perform Home Assistant action, you can enable this functionality in the options flow."
     }
   }
 }
