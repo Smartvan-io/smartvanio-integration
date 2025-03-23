@@ -2,3 +2,4 @@ colorlog==6.9.0
 pip>=8.0.3,<24.4
 ruff==0.8.6
 scipy>=1.10.1
+aioesphomeapi==29.0.0

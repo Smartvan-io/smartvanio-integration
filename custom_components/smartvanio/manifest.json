@@ -15,7 +15,7 @@
   "iot_class": "local_push",
   "loggers": ["aioesphomeapi", "noiseprotocol", "bleak_esphome"],
   "mqtt": ["smartvanio/discover/#"],
-  "requirements": ["scipy>=1.10.1"],
+  "requirements": ["scipy>=1.10.1", "aioesphomeapi==29.0.0"],
   "zeroconf": ["_smartvaniolib._tcp.local."],
-  "version": "1.0.1"
+  "version": "1.0.2"
 }
