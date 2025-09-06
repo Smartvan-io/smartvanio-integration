@@ -17,5 +17,5 @@
   "mqtt": ["smartvanio/discover/#"],
   "requirements": ["scipy>=1.10.1", "aioesphomeapi==29.0.0"],
   "zeroconf": ["_smartvaniolib._tcp.local."],
-  "version": "1.0.5"
+  "version": "1.0.6"
 }
