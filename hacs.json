@@ -1,8 +1,8 @@
 {
   "name": "SmartVan.io Device integration",
-  "homeassistant": "2025.2.0",
+  "homeassistant": "2025.8.3",
   "hacs": "2.0.1",
   "codeowners": ["jameslouiz"],
-  "version": "1.0.0",
+  "version": "1.0.1",
   "domain": "smartvanio"
 }
