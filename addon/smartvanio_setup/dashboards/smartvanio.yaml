@@ -1,0 +1,8 @@
+title: SmartVan.io
+
+views:
+  - title: Dashboard
+    path: default
+    type: panel
+    cards:
+      - type: custom:smartvanio-main-card

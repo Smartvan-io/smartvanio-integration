@@ -1,0 +1,18 @@
+title: Home
+views:
+  - title: Overview
+    path: default
+    cards:
+      - type: entities
+        title: SmartVan.io Devices
+        show_header_toggle: false
+        entities:
+          - type: section
+            label: Lights
+          - light.smartvanio_led_873450_led_strip_1
+          - light.smartvanio_led_873450_led_strip_2
+          - light.smartvanio_led_873450_led_strip_3
+          - light.smartvanio_led_873450_led_strip_4
+          - type: section
+            label: Sensors
+          - sensor.smartvanio_led_873450_internal_temperature

@@ -1,149 +1,139 @@
-"""Support for esphome devices."""
+"""SmartVan.io — Campervan Smart Control System integration for Home Assistant.
+
+This integration discovers SmartVan.io devices via MQTT and creates HA entities
+for lights, switches, and sensors. It bridges MQTT JSON messages to native
+HA entity states.
+"""
 
 from __future__ import annotations
 
-from aioesphomeapi import APIClient
-import voluptuous as vol
+import json
+import logging
+from typing import Any
 
-from homeassistant.components import ffmpeg, websocket_api, zeroconf
-from homeassistant.components.bluetooth import async_remove_scanner
-from homeassistant.const import (
-    CONF_HOST,
-    CONF_PASSWORD,
-    CONF_PORT,
-    __version__ as ha_version,
-)
+from homeassistant.components import mqtt
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import config_validation as cv
-from homeassistant.helpers.typing import ConfigType
+from homeassistant.helpers import device_registry as dr
 
-from .const import CONF_BLUETOOTH_MAC_ADDRESS, CONF_NOISE_PSK, DATA_FFMPEG_PROXY, DOMAIN
-from .dashboard import async_setup as async_setup_dashboard
-from .domain_data import DomainData
-
-# Import config flow so that it's added to the registry
-from .entry_data import ESPHomeConfigEntry, RuntimeEntryData
-from .ffmpeg_proxy import FFmpegProxyData, FFmpegProxyView
-from .manager import ESPHomeManager, cleanup_instance
-
-CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
-
-CLIENT_INFO = f"Home Assistant {ha_version}"
-
-websocket_schema_get_resistive_sensor_config = (
-    websocket_api.BASE_COMMAND_MESSAGE_SCHEMA.extend(
-        {
-            vol.Required("type"): "smartvanio/get_resistive_sensor_config_data",
-            vol.Required("device_id"): str,
-        }
-    )
+from .const import (
+    DOMAIN,
+    MANUFACTURER,
+    MQTT_TOPIC_PREFIX,
+    MQTT_QOS,
+    PLATFORMS,
+    DISCOVERY_TOPIC_SUFFIX,
+    STATUS_TOPIC_SUFFIX,
+    ENTITY_TYPE_LIGHT,
 )
 
+_LOGGER = logging.getLogger(__name__)
 
-async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
-    """Set up the esphome component."""
-    proxy_data = hass.data[DATA_FFMPEG_PROXY] = FFmpegProxyData()
+# Store discovered devices and their config payloads
+# Keyed by device_id
+type SmartVanConfigEntry = ConfigEntry
 
-    await async_setup_dashboard(hass)
-    hass.http.register_view(
-        FFmpegProxyView(ffmpeg.get_ffmpeg_manager(hass), proxy_data)
+
+async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> bool:
+    """Set up SmartVan.io from a config entry."""
+    _LOGGER.info("Setting up SmartVan.io integration")
+
+    # Store runtime data for this integration
+    hass.data.setdefault(DOMAIN, {})
+    hass.data[DOMAIN][entry.entry_id] = {
+        "devices": {},
+        "pending_configs": {},
+    }
+
+    # Subscribe to discovery topic for all smartvanio devices
+    # Topic pattern: smartvanio/+/config
+    discovery_topic = f"{MQTT_TOPIC_PREFIX}/+/{DISCOVERY_TOPIC_SUFFIX}"
+    _LOGGER.debug("Subscribing to discovery topic: %s", discovery_topic)
+
+    @callback
+    def _handle_discovery(msg: mqtt.ReceiveMessage) -> None:
+        """Handle incoming device discovery messages."""
+        try:
+            payload = json.loads(msg.payload)
+        except (json.JSONDecodeError, ValueError):
+            _LOGGER.warning("Invalid JSON in discovery message: %s", msg.topic)
+            return
+
+        device_id = payload.get("device_id")
+        if not device_id:
+            _LOGGER.warning("Discovery payload missing device_id: %s", payload)
+            return
+
+        _LOGGER.info(
+            "Discovered SmartVan.io device: %s (%s)",
+            payload.get("name", device_id),
+            device_id,
+        )
+
+        # Register the device in HA device registry
+        device_registry = dr.async_get(hass)
+        device_registry.async_get_or_create(
+            config_entry_id=entry.entry_id,
+            identifiers={(DOMAIN, device_id)},
+            name=payload.get("name", f"SmartVan.io {device_id}"),
+            manufacturer=MANUFACTURER,
+            model=payload.get("model", "Unknown"),
+            sw_version=payload.get("firmware", "Unknown"),
+        )
+
+        # Store config and notify platforms
+        store = hass.data[DOMAIN][entry.entry_id]
+        store["devices"][device_id] = payload
+        store["pending_configs"][device_id] = payload
+
+        # Fire event so platforms can pick up new entities
+        hass.bus.async_fire(
+            f"{DOMAIN}_device_discovered",
+            {"device_id": device_id, "config": payload},
+        )
+
+    await mqtt.async_subscribe(
+        hass, discovery_topic, _handle_discovery, qos=MQTT_QOS
     )
+
+    # Subscribe to status topic for availability tracking
+    status_topic = f"{MQTT_TOPIC_PREFIX}/+/{STATUS_TOPIC_SUFFIX}"
+
+    @callback
+    def _handle_status(msg: mqtt.ReceiveMessage) -> None:
+        """Handle device status (online/offline) messages."""
+        try:
+            payload = json.loads(msg.payload)
+        except (json.JSONDecodeError, ValueError):
+            return
+
+        # Extract device_id from topic: smartvanio/{device_id}/status
+        parts = msg.topic.split("/")
+        if len(parts) >= 2:
+            device_id = parts[1]
+            state = payload.get("state", "offline")
+            _LOGGER.debug("Device %s status: %s", device_id, state)
+
+            # Fire availability event
+            hass.bus.async_fire(
+                f"{DOMAIN}_device_status",
+                {"device_id": device_id, "available": state == "online"},
+            )
+
+    await mqtt.async_subscribe(
+        hass, status_topic, _handle_status, qos=MQTT_QOS
+    )
+
+    # Forward setup to platforms (light, switch, sensor, etc.)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    _LOGGER.info("SmartVan.io integration setup complete")
     return True
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
-    """Set up the esphome component."""
-    host: str = entry.data[CONF_HOST]
-    port: int = entry.data[CONF_PORT]
-    password: str | None = entry.data[CONF_PASSWORD]
-    noise_psk: str | None = entry.data.get(CONF_NOISE_PSK)
-
-    zeroconf_instance = await zeroconf.async_get_instance(hass)
-
-    cli = APIClient(
-        host,
-        port,
-        password,
-        client_info=CLIENT_INFO,
-        zeroconf_instance=zeroconf_instance,
-        noise_psk=noise_psk,
-    )
-
-    domain_data = DomainData.get(hass)
-    entry_data = RuntimeEntryData(
-        client=cli,
-        entry_id=entry.entry_id,
-        title=entry.title,
-        store=domain_data.get_or_create_store(hass, entry),
-        original_options=dict(entry.options),
-    )
-    entry.runtime_data = entry_data
-
-    manager = ESPHomeManager(
-        hass, entry, host, password, cli, zeroconf_instance, domain_data
-    )
-    await manager.async_start()
-
-    return True
-
-
-async def async_unload_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> bool:
-    """Unload an esphome config entry."""
-    entry_data = await cleanup_instance(hass, entry)
-    return await hass.config_entries.async_unload_platforms(
-        entry, entry_data.loaded_platforms
-    )
-
-
-async def async_remove_entry(hass: HomeAssistant, entry: ESPHomeConfigEntry) -> None:
-    """Remove an esphome config entry."""
-    if bluetooth_mac_address := entry.data.get(CONF_BLUETOOTH_MAC_ADDRESS):
-        async_remove_scanner(hass, bluetooth_mac_address.upper())
-    await DomainData.get(hass).get_or_create_store(hass, entry).async_remove()
-
-
-@callback
-@websocket_api.require_admin
-@websocket_api.websocket_command(
-    {
-        vol.Required("type"): "smartvanio/get_resistive_sensor_config_data",
-        vol.Required("device_id"): str,
-    }
-)
-def websocket_handle_get_resistive_sensor_config(
-    hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict
-):
-    """Handle our custom WS command to get config data."""
-    # For example, get the config entry from hass.data or by domain
-    # This will vary by how you store references to your config entries
-    device_id = msg["device_id"]
-
-    config_entry_id = None
-    for entry in hass.config_entries.async_entries(DOMAIN):
-        if entry.data.get("device_name") == device_id:
-            config_entry_id = entry.entry_id
-            break
-
-    if not config_entry_id:
-        connection.send_error(msg["id"], "not_found", "Config entry not found.")
-        return
-
-    config_entry = hass.config_entries.async_get_entry(config_entry_id)
-    if not config_entry:
-        connection.send_error(msg["id"], "not_found", "Config entry not found.")
-        return
-
-    sensor_1_entry = config_entry.options.get(
-        "sensor_1", config_entry.data.get("sensor_1", {})
-    )
-    sensor_2_entry = config_entry.options.get(
-        "sensor_2", config_entry.data.get("sensor_2", {})
-    )
-
-    response = {
-        "sensor_1": {"name": sensor_1_entry.get("name")},
-        "sensor_2": {"name": sensor_2_entry.get("name")},
-    }
-
-    # Return the data to the caller
-    connection.send_result(msg["id"], response)
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    """Unload a config entry."""
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if unload_ok:
+        hass.data[DOMAIN].pop(entry.entry_id, None)
+    return unload_ok

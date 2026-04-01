@@ -1,0 +1,13 @@
+title: SmartVan.io
+
+kiosk_mode:
+  hide_sidebar: true
+  hide_header: true
+
+views:
+  - title: Dashboard
+    path: default
+    type: panel
+    cards:
+      - type: custom:smartvanio-main-card
+        device_id: smartvanio-led-873450

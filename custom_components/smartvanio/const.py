@@ -1,26 +1,35 @@
-"""ESPHome constants."""
-
-from awesomeversion import AwesomeVersion
+"""Constants for the SmartVan.io integration."""
 
 DOMAIN = "smartvanio"
+MANUFACTURER = "SmartVan.io"
 
-CONF_ALLOW_SERVICE_CALLS = "allow_service_calls"
-CONF_SUBSCRIBE_LOGS = "subscribe_logs"
-CONF_DEVICE_NAME = "device_name"
-CONF_NOISE_PSK = "noise_psk"
-CONF_BLUETOOTH_MAC_ADDRESS = "bluetooth_mac_address"
+# MQTT
+MQTT_TOPIC_PREFIX = "smartvanio"
+MQTT_QOS = 1
 
-DEFAULT_ALLOW_SERVICE_CALLS = True
-DEFAULT_NEW_CONFIG_ALLOW_ALLOW_SERVICE_CALLS = False
+# Config keys
+CONF_DEVICE_ID = "device_id"
+CONF_MQTT_PREFIX = "mqtt_prefix"
 
+# Defaults
+DEFAULT_MQTT_PREFIX = "smartvanio"
 
-STABLE_BLE_VERSION_STR = "2025.2.2"
-STABLE_BLE_VERSION = AwesomeVersion(STABLE_BLE_VERSION_STR)
-PROJECT_URLS = {
-    "esphome.bluetooth-proxy": "https://esphome.github.io/bluetooth-proxies/",
-}
-# ESPHome always uses .0 for the changelog URL
-STABLE_BLE_URL_VERSION = f"{STABLE_BLE_VERSION.major}.{STABLE_BLE_VERSION.minor}.0"
-DEFAULT_URL = f"https://esphome.io/changelog/{STABLE_BLE_URL_VERSION}.html"
+# Platforms we support
+PLATFORMS = ["light", "switch", "sensor", "binary_sensor", "scene", "number", "select", "button"]
 
-DATA_FFMPEG_PROXY = f"{DOMAIN}.ffmpeg_proxy"
+# Discovery
+DISCOVERY_TOPIC_SUFFIX = "config"
+STATUS_TOPIC_SUFFIX = "status"
+
+# Entity type mapping
+ENTITY_TYPE_LIGHT = "light"
+ENTITY_TYPE_SWITCH = "switch"
+ENTITY_TYPE_SENSOR = "sensor"
+ENTITY_TYPE_BINARY_SENSOR = "binary_sensor"
+ENTITY_TYPE_SCENE = "scene"
+ENTITY_TYPE_NUMBER = "number"
+ENTITY_TYPE_SELECT = "select"
+ENTITY_TYPE_BUTTON = "button"
+
+# Scenes MQTT
+SCENES_TOPIC_SUFFIX = "scenes"

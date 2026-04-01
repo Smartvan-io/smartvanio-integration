@@ -1,57 +1,120 @@
-"""Support for ESPHome buttons."""
+"""SmartVan.io Button platform.
+
+Creates Home Assistant button entities from SmartVan.io device discovery.
+Handles momentary actions such as calibrate/reset triggers.
+
+Topics:
+  Command: smartvanio/{device_id}/button/{channel}/press  <- {}
+  (buttons have no state topic)
+"""
 
 from __future__ import annotations
 
-from functools import partial
+import json
+import logging
+from typing import Any
 
-from aioesphomeapi import ButtonInfo, EntityInfo, EntityState
+from homeassistant.components import mqtt
+from homeassistant.components.button import ButtonEntity
+from homeassistant.config_entries import ConfigEntry
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from homeassistant.components.button import ButtonDeviceClass, ButtonEntity
-from homeassistant.core import callback
-from homeassistant.util.enum import try_parse_enum
+from .const import DOMAIN, MANUFACTURER, MQTT_TOPIC_PREFIX, MQTT_QOS, ENTITY_TYPE_BUTTON
 
-from .entity import (
-    EsphomeEntity,
-    convert_api_error_ha_error,
-    platform_async_setup_entry,
-)
+_LOGGER = logging.getLogger(__name__)
 
 
-class EsphomeButton(EsphomeEntity[ButtonInfo, EntityState], ButtonEntity):
-    """A button implementation for ESPHome."""
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
+) -> None:
+    """Set up SmartVan.io button entities from config entry."""
+    store = hass.data[DOMAIN][entry.entry_id]
+    created_entities: set[str] = set()
+
+    def _create_buttons_from_config(device_id: str, config: dict) -> list[SmartVanButton]:
+        buttons = []
+        for entity_config in config.get("entities", []):
+            if entity_config.get("type") != ENTITY_TYPE_BUTTON:
+                continue
+            channel = entity_config.get("channel", "unknown")
+            unique_id = f"{device_id}_{channel}"
+            if unique_id in created_entities:
+                continue
+            buttons.append(SmartVanButton(hass, device_id, channel, entity_config, config))
+            created_entities.add(unique_id)
+            _LOGGER.info("Created button entity: %s", unique_id)
+        return buttons
+
+    for device_id, config in store.get("pending_configs", {}).items():
+        entities = _create_buttons_from_config(device_id, config)
+        if entities:
+            async_add_entities(entities)
 
     @callback
-    def _on_static_info_update(self, static_info: EntityInfo) -> None:
-        """Set attrs from static info."""
-        super()._on_static_info_update(static_info)
-        self._attr_device_class = try_parse_enum(
-            ButtonDeviceClass, self._static_info.device_class
+    def _on_device_discovered(event) -> None:
+        device_id = event.data.get("device_id")
+        config = event.data.get("config", {})
+        entities = _create_buttons_from_config(device_id, config)
+        if entities:
+            async_add_entities(entities)
+
+    hass.bus.async_listen(f"{DOMAIN}_device_discovered", _on_device_discovered)
+
+
+class SmartVanButton(ButtonEntity):
+    """A momentary action exposed over MQTT."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        device_id: str,
+        channel: str,
+        entity_config: dict[str, Any],
+        device_config: dict[str, Any],
+    ) -> None:
+        self.hass = hass
+        self._device_id = device_id
+        self._channel = channel
+        self._device_config = device_config
+
+        self._attr_unique_id = f"{device_id}_{channel}"
+        self._attr_name = entity_config.get("name", f"Button {channel}")
+        self._attr_icon = entity_config.get("icon")
+        self._attr_available = True
+
+        self._command_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/button/{channel}/press"
+        self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._device_id)},
+            name=self._device_config.get("name", f"SmartVan.io {self._device_id}"),
+            manufacturer=MANUFACTURER,
+            model=self._device_config.get("model", "Unknown"),
+            sw_version=self._device_config.get("firmware", "Unknown"),
         )
 
-    @callback
-    def _on_device_update(self) -> None:
-        """Call when device updates or entry data changes.
+    async def async_added_to_hass(self) -> None:
+        @callback
+        def _status_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            self._attr_available = payload.get("state") == "online"
+            self.async_write_ha_state()
 
-        The default behavior is only to write entity state when the
-        device is unavailable when the device state changes.
-        This method overrides the default behavior since buttons do
-        not have a state, so we will never get a state update for a
-        button. As such, we need to write the state on every device
-        update to ensure the button goes available and unavailable
-        as the device becomes available or unavailable.
-        """
-        self._on_entry_data_changed()
-        self.async_write_ha_state()
+        await mqtt.async_subscribe(self.hass, self._status_topic, _status_received, qos=MQTT_QOS)
 
-    @convert_api_error_ha_error
     async def async_press(self) -> None:
-        """Press the button."""
-        self._client.button_command(self._key)
-
-
-async_setup_entry = partial(
-    platform_async_setup_entry,
-    info_type=ButtonInfo,
-    entity_type=EsphomeButton,
-    state_type=EntityState,
-)
+        await mqtt.async_publish(
+            self.hass, self._command_topic, json.dumps({}),
+            qos=MQTT_QOS, retain=False,
+        )

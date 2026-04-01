@@ -1,38 +1,28 @@
-"""Support for esphome sensors."""
+"""SmartVan.io Sensor platform.
+
+Creates Home Assistant sensor entities from SmartVan.io device discovery.
+Handles tank levels (water, gas, waste) and any other numeric sensors
+declared with entity type "sensor" in the config payload.
+"""
 
 from __future__ import annotations
 
 import json
-import math
 import logging
-from datetime import date, datetime
+from typing import Any
 
-from aioesphomeapi import (
-    EntityInfo,
-    SensorInfo,
-    SensorState,
-    SensorStateClass as EsphomeSensorStateClass,
-    TextSensorInfo,
-    TextSensorState,
-)
-from aioesphomeapi.model import LastResetType
+import numpy as np
 from scipy.interpolate import interp1d
 
-from homeassistant.components.sensor import (
-    SensorDeviceClass,
-    SensorEntity,
-    SensorStateClass,
-)
+from homeassistant.components import mqtt
+from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import STATE_UNAVAILABLE, STATE_UNKNOWN
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.event import async_track_state_change_event
-from homeassistant.util import dt as dt_util
-from homeassistant.util.enum import try_parse_enum
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .entity import EsphomeEntity, platform_async_setup_entry
-from .enum_mapper import EsphomeEnumMapper
+from .const import DOMAIN, MANUFACTURER, MQTT_TOPIC_PREFIX, MQTT_QOS, ENTITY_TYPE_SENSOR
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -40,225 +30,360 @@ _LOGGER = logging.getLogger(__name__)
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
-    async_add_entities: AddConfigEntryEntitiesCallback,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up esphome sensors based on a config entry."""
+    """Set up SmartVan.io sensors from config entry."""
+    store = hass.data[DOMAIN][entry.entry_id]
+    created_entities: set[str] = set()
 
-    _LOGGER.debug("Setting up Esphome sensors for entry: %s", entry.entry_id)
+    def _create_sensors_from_config(device_id: str, config: dict) -> list[SmartVanSensor]:
+        sensors = []
+        for entity_config in config.get("entities", []):
+            if entity_config.get("type") != ENTITY_TYPE_SENSOR:
+                continue
+            channel = entity_config.get("channel", "unknown")
+            unique_id = f"{device_id}_{channel}"
+            if unique_id in created_entities:
+                continue
+            if entity_config.get("sensor_type") == "tank_level":
+                sensors.append(SmartVanTankLevelSensor(hass, device_id, channel, entity_config, config))
+            elif entity_config.get("sensor_type") == "tank_config":
+                sensors.append(SmartVanTankConfigSensor(hass, device_id, channel, entity_config, config))
+            elif entity_config.get("sensor_type") == "tank_kind":
+                sensors.append(SmartVanTextSensor(hass, device_id, channel, entity_config, config))
+            else:
+                sensors.append(SmartVanSensor(hass, device_id, channel, entity_config, config))
+            created_entities.add(unique_id)
+            _LOGGER.info("Created sensor entity: %s", unique_id)
+        return sensors
 
-    await platform_async_setup_entry(
-        hass,
-        entry,
-        async_add_entities,
-        info_type=SensorInfo,
-        entity_type=EsphomeSensor,
-        state_type=SensorState,
-    )
-    await platform_async_setup_entry(
-        hass,
-        entry,
-        async_add_entities,
-        info_type=TextSensorInfo,
-        entity_type=EsphomeTextSensor,
-        state_type=TextSensorState,
-    )
-
-
-_STATE_CLASSES: EsphomeEnumMapper[EsphomeSensorStateClass, SensorStateClass | None] = (
-    EsphomeEnumMapper(
-        {
-            EsphomeSensorStateClass.NONE: None,
-            EsphomeSensorStateClass.MEASUREMENT: SensorStateClass.MEASUREMENT,
-            EsphomeSensorStateClass.TOTAL_INCREASING: SensorStateClass.TOTAL_INCREASING,
-            EsphomeSensorStateClass.TOTAL: SensorStateClass.TOTAL,
-        }
-    )
-)
-
-
-class EsphomeSensor(EsphomeEntity[SensorInfo, SensorState], SensorEntity):
-    """A sensor implementation for esphome."""
+    for device_id, config in store.get("pending_configs", {}).items():
+        entities = _create_sensors_from_config(device_id, config)
+        if entities:
+            async_add_entities(entities)
 
     @callback
-    def _on_static_info_update(self, static_info: EntityInfo) -> None:
-        """Set attrs from static info."""
-        try:
-            super()._on_static_info_update(static_info)
-            static_info = self._static_info
-            self._attr_force_update = static_info.force_update
-            if unit_of_measurement := static_info.unit_of_measurement:
-                self._attr_native_unit_of_measurement = unit_of_measurement
-            self._attr_device_class = try_parse_enum(
-                SensorDeviceClass, static_info.device_class
-            )
+    def _on_device_discovered(event) -> None:
+        device_id = event.data.get("device_id")
+        config = event.data.get("config", {})
+        entities = _create_sensors_from_config(device_id, config)
+        if entities:
+            async_add_entities(entities)
 
-            self._attr_suggested_display_precision = 2
+    hass.bus.async_listen(f"{DOMAIN}_device_discovered", _on_device_discovered)
 
-            if not (state_class := static_info.state_class):
-                return
-            if (
-                state_class == EsphomeSensorStateClass.MEASUREMENT
-                # and static_info.last_reset_type == LastResetType.AUTO
-            ):
-                self._attr_state_class = SensorStateClass.TOTAL_INCREASING
-            else:
-                self._attr_state_class = _STATE_CLASSES.from_esphome(state_class)
-        except Exception as e:
-            _LOGGER.exception(
-                "Failed in _on_static_info_update for %s: %s", self.entity_id, e
-            )
+
+class SmartVanSensor(SensorEntity):
+    """Representation of a SmartVan.io numeric sensor via MQTT."""
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        device_id: str,
+        channel: str,
+        entity_config: dict[str, Any],
+        device_config: dict[str, Any],
+    ) -> None:
+        self.hass = hass
+        self._device_id = device_id
+        self._channel = channel
+        self._device_config = device_config
+
+        self._attr_unique_id = f"{device_id}_{channel}"
+        self._attr_name = entity_config.get("name", f"Sensor {channel}")
+        self._attr_native_unit_of_measurement = entity_config.get("unit")
+        self._attr_native_value = None
+        self._attr_available = True
+
+        self._state_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/sensor/{channel}/state"
+        self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
 
     @property
-    def native_value(self) -> datetime | str | None:
-        try:
-            if self.entity_id.endswith("interpolated_value"):
-                base_entity_id = self.entity_id.removesuffix(
-                    "_interpolated_value"
-                ).removeprefix("sensor.")
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._device_id)},
+            name=self._device_config.get("name", f"SmartVan.io {self._device_id}"),
+            manufacturer=MANUFACTURER,
+            model=self._device_config.get("model", "Unknown"),
+            sw_version=self._device_config.get("firmware", "Unknown"),
+        )
 
-                raw_entity_id = f"sensor.{base_entity_id}_raw"
+    async def async_added_to_hass(self) -> None:
+        @callback
+        def _state_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            self._attr_native_value = payload.get("value")
+            # Unit can be overridden by the device payload
+            if "unit" in payload:
+                self._attr_native_unit_of_measurement = payload["unit"]
+            self.async_write_ha_state()
 
-                interpolation_points_entity_id = (
-                    f"text.{base_entity_id}_interpolation_points"
-                )
-
-                interpolation_kind_entity_id = (
-                    f"select.{base_entity_id}_interpolation_kind"
-                )
-
-                raw_value = self.hass.states.get(raw_entity_id).state
-
-                interpolation_points = self.hass.states.get(
-                    interpolation_points_entity_id
-                ).state
-
-                interpolation_kind = self.hass.states.get(
-                    interpolation_kind_entity_id
-                ).state
-
-                if (
-                    interpolation_kind == "unavailable"
-                    or interpolation_points == "unavailable"
-                ):
-                    return None
-
-                return self._interpolate(
-                    raw_value, interpolation_points, interpolation_kind
-                )
-
-            if not self._has_state or (state := self._state).missing_state:
-                return None
-
-            state_float = state.state
-
-            if not math.isfinite(state_float):
-                return None
-
-            if self.device_class is SensorDeviceClass.TIMESTAMP:
-                return dt_util.utc_from_timestamp(state_float)
-
-            return f"{state_float:.{self._static_info.accuracy_decimals}f}"
-
-        except Exception as e:
-            _LOGGER.exception("Error in native_value for %s: %s", self.entity_id, e)
-            return None
-
-    async def async_added_to_hass(self):
-        await super().async_added_to_hass()
+        await mqtt.async_subscribe(self.hass, self._state_topic, _state_received, qos=MQTT_QOS)
 
         @callback
-        def _async_sensor_state_changed(event):
-            self.async_schedule_update_ha_state()
-
-        if self.entity_id.endswith("interpolated_value"):
-            self.async_schedule_update_ha_state()
-            base_entity_id = self.entity_id.removesuffix(
-                "_interpolated_value"
-            ).removeprefix("sensor.")
-            async_track_state_change_event(
-                self.hass,
-                [
-                    f"sensor.{base_entity_id}_raw",
-                    f"text.{base_entity_id}_interpolation_points",
-                    f"select.{base_entity_id}_interpolation_kind",
-                ],
-                _async_sensor_state_changed,
-            )
-
-    def _interpolate(
-        self, raw_value, interpolation_points, interpolation_kind="linear"
-    ):
-        try:
+        def _status_received(msg: mqtt.ReceiveMessage) -> None:
             try:
-                float(raw_value)
-            except (ValueError, TypeError):
-                return None
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            self._attr_available = payload.get("state") == "online"
+            self.async_write_ha_state()
 
-            if raw_value is None:
-                return None
-
-            if not interpolation_points or interpolation_points in (
-                STATE_UNKNOWN,
-                STATE_UNAVAILABLE,
-            ):
-                return None
-
-            points = json.loads(interpolation_points)
-            if len(points) < 2:
-                return None
-
-            sorted_points = sorted(points, key=lambda x: x[0])
-            x_vals, y_vals = zip(*sorted_points, strict=False)
-
-            interpolator = interp1d(
-                x_vals,
-                y_vals,
-                kind=interpolation_kind,
-                fill_value="extrapolate",
-            )
-
-            interpolated = interpolator(raw_value)
-
-            y_min = min(y_vals)
-            y_max = max(y_vals)
-            result = max(min(interpolated, y_max), y_min)
-
-            return (int(10 * result - 0.5) + 1) / 10.0
-        except Exception as e:
-            _LOGGER.exception("Interpolation failed for %s: %s", self.entity_id, e)
-            return raw_value
+        await mqtt.async_subscribe(self.hass, self._status_topic, _status_received, qos=MQTT_QOS)
 
 
-class EsphomeTextSensor(EsphomeEntity[TextSensorInfo, TextSensorState], SensorEntity):
-    """A text sensor implementation for ESPHome."""
+class SmartVanTextSensor(SensorEntity):
+    """A sensor that holds a string state (no measurement state class)."""
 
-    @callback
-    def _on_static_info_update(self, static_info: EntityInfo) -> None:
-        try:
-            super()._on_static_info_update(static_info)
-            static_info = self._static_info
-            self._attr_device_class = try_parse_enum(
-                SensorDeviceClass, static_info.device_class
-            )
-        except Exception as e:
-            _LOGGER.exception("Failed in TextSensor static info update: %s", e)
+    _attr_has_entity_name = True
+    _attr_state_class = None
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        device_id: str,
+        channel: str,
+        entity_config: dict[str, Any],
+        device_config: dict[str, Any],
+    ) -> None:
+        self.hass = hass
+        self._device_id = device_id
+        self._channel = channel
+        self._device_config = device_config
+
+        self._attr_unique_id = f"{device_id}_{channel}"
+        self._attr_name = entity_config.get("name", f"Sensor {channel}")
+        self._attr_native_value = None
+        self._attr_available = True
+
+        self._state_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/sensor/{channel}/state"
+        self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
 
     @property
-    def native_value(self) -> str | datetime | date | None:
-        try:
-            if not self._has_state or (state := self._state).missing_state:
-                return None
-            state_str = state.state
-            device_class = self.device_class
-            if device_class is SensorDeviceClass.TIMESTAMP:
-                return dt_util.parse_datetime(state_str)
-            if (
-                device_class is SensorDeviceClass.DATE
-                and (value := dt_util.parse_datetime(state_str)) is not None
-            ):
-                return value.date()
-            return state_str
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._device_id)},
+            name=self._device_config.get("name", f"SmartVan.io {self._device_id}"),
+            manufacturer=MANUFACTURER,
+            model=self._device_config.get("model", "Unknown"),
+            sw_version=self._device_config.get("firmware", "Unknown"),
+        )
 
-        except Exception as e:
-            _LOGGER.exception("Failed to get native_value for text sensor: %s", e)
+    async def async_added_to_hass(self) -> None:
+        @callback
+        def _state_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            self._attr_native_value = payload.get("value")
+            self.async_write_ha_state()
+
+        await mqtt.async_subscribe(self.hass, self._state_topic, _state_received, qos=MQTT_QOS)
+
+        @callback
+        def _status_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            self._attr_available = payload.get("state") == "online"
+            self.async_write_ha_state()
+
+        await mqtt.async_subscribe(self.hass, self._status_topic, _status_received, qos=MQTT_QOS)
+
+
+class SmartVanTankLevelSensor(SensorEntity):
+    """Tank level (%) computed in HA by interpolating raw voltage against calibration points.
+
+    Subscribes to three MQTT topics for the same tank:
+      - ``sensor/{channel}_voltage/state``  — raw ADC voltage
+      - ``sensor/{channel}_config/state``   — JSON calibration points ``[[v, pct], ...]``
+      - ``sensor/{channel}_kind/state``     — interpolation kind string
+
+    Recomputes and updates state whenever any of the three change.
+    """
+
+    _attr_has_entity_name = True
+    _attr_state_class = SensorStateClass.MEASUREMENT
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        device_id: str,
+        channel: str,
+        entity_config: dict[str, Any],
+        device_config: dict[str, Any],
+    ) -> None:
+        self.hass = hass
+        self._device_id = device_id
+        self._channel = channel
+        self._device_config = device_config
+
+        self._attr_unique_id = f"{device_id}_{channel}"
+        self._attr_name = entity_config.get("name", f"Tank {channel}")
+        self._attr_native_unit_of_measurement = entity_config.get("unit", "%")
+        self._attr_native_value = None
+        self._attr_available = True
+
+        self._voltage: float | None = None
+        self._cal_points: list = [[0.0, 0], [3.3, 100]]
+        self._cal_kind: str = "linear"
+
+        prefix = f"{MQTT_TOPIC_PREFIX}/{device_id}/sensor/{channel}"
+        self._voltage_topic = f"{prefix}_voltage/state"
+        self._config_topic  = f"{prefix}_config/state"
+        self._kind_topic    = f"{prefix}_kind/state"
+        self._status_topic  = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._device_id)},
+            name=self._device_config.get("name", f"SmartVan.io {self._device_id}"),
+            manufacturer=MANUFACTURER,
+            model=self._device_config.get("model", "Unknown"),
+            sw_version=self._device_config.get("firmware", "Unknown"),
+        )
+
+    @staticmethod
+    def _interpolate(voltage: float, points: list, kind: str = "linear") -> float | None:
+        if not points or len(points) < 2:
             return None
+        pts = sorted(points, key=lambda p: p[0])
+        xs = np.array([p[0] for p in pts], dtype=float)
+        ys = np.array([p[1] for p in pts], dtype=float)
+        # scipy kind strings: linear, nearest, zero, slinear, quadratic, cubic
+        # Clamp voltage to calibration range before interpolating
+        v = float(np.clip(voltage, xs[0], xs[-1]))
+        try:
+            fn = interp1d(xs, ys, kind=kind, bounds_error=False, fill_value=(ys[0], ys[-1]))
+            return round(float(fn(v)), 1)
+        except (ValueError, NotImplementedError):
+            # Fall back to linear if kind requires more points than available
+            fn = interp1d(xs, ys, kind="linear", bounds_error=False, fill_value=(ys[0], ys[-1]))
+            return round(float(fn(v)), 1)
+
+    def _recompute(self) -> None:
+        if self._voltage is not None:
+            self._attr_native_value = self._interpolate(self._voltage, self._cal_points, self._cal_kind)
+        self.async_write_ha_state()
+
+    async def async_added_to_hass(self) -> None:
+        @callback
+        def _voltage_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            self._voltage = payload.get("value")
+            self._recompute()
+
+        @callback
+        def _config_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            if "points" in payload:
+                self._cal_points = payload["points"]
+                self._recompute()
+
+        @callback
+        def _kind_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            if "value" in payload:
+                self._cal_kind = payload["value"]
+                self._recompute()
+
+        @callback
+        def _status_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            self._attr_available = payload.get("state") == "online"
+            self.async_write_ha_state()
+
+        await mqtt.async_subscribe(self.hass, self._voltage_topic, _voltage_received, qos=MQTT_QOS)
+        await mqtt.async_subscribe(self.hass, self._config_topic,  _config_received,  qos=MQTT_QOS)
+        await mqtt.async_subscribe(self.hass, self._kind_topic,    _kind_received,    qos=MQTT_QOS)
+        await mqtt.async_subscribe(self.hass, self._status_topic,  _status_received,  qos=MQTT_QOS)
+
+
+class SmartVanTankConfigSensor(SensorEntity):
+    """Stores tank calibration points as a JSON string in entity state.
+
+    Mirrors the ESPHome text entity: state is the raw JSON array string
+    ``[[v, pct], ...]`` so the Lovelace card reads it via
+    ``JSON.parse(hass.states[entity_id].state)``.
+    """
+
+    _attr_has_entity_name = True
+    _attr_state_class = None
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        device_id: str,
+        channel: str,
+        entity_config: dict[str, Any],
+        device_config: dict[str, Any],
+    ) -> None:
+        self.hass = hass
+        self._device_id = device_id
+        self._channel = channel
+        self._device_config = device_config
+
+        self._attr_unique_id = f"{device_id}_{channel}"
+        self._attr_name = entity_config.get("name", f"Cal Points {channel}")
+        self._attr_native_value = "[[0.0, 0], [3.3, 100]]"
+        self._attr_available = True
+
+        self._state_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/sensor/{channel}/state"
+        self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._device_id)},
+            name=self._device_config.get("name", f"SmartVan.io {self._device_id}"),
+            manufacturer=MANUFACTURER,
+            model=self._device_config.get("model", "Unknown"),
+            sw_version=self._device_config.get("firmware", "Unknown"),
+        )
+
+    async def async_added_to_hass(self) -> None:
+        @callback
+        def _config_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            if "points" in payload:
+                self._attr_native_value = json.dumps(payload["points"])
+            self.async_write_ha_state()
+
+        await mqtt.async_subscribe(self.hass, self._state_topic, _config_received, qos=MQTT_QOS)
+
+        @callback
+        def _status_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            self._attr_available = payload.get("state") == "online"
+            self.async_write_ha_state()
+
+        await mqtt.async_subscribe(self.hass, self._status_topic, _status_received, qos=MQTT_QOS)

@@ -1,0 +1,32 @@
+# SmartVan.io Development Configuration
+
+homeassistant:
+  name: SmartVan.io Dev
+  unit_system: metric
+  currency: GBP
+  time_zone: Europe/London
+
+# Enable default_config for standard HA functionality
+default_config:
+
+# Logger for debugging
+logger:
+  default: info
+  logs:
+    custom_components.smartvanio: debug
+
+# Lovelace dashboards
+lovelace:
+  mode: yaml
+  resources:
+    - url: /local/kiosk-mode.js
+      type: module
+    - url: /local/smartvanio-main-card.js
+      type: module
+  dashboards:
+    smartvan-io:
+      mode: yaml
+      title: SmartVan.io
+      icon: mdi:van-utility
+      show_in_sidebar: true
+      filename: dashboards/smartvanio.yaml

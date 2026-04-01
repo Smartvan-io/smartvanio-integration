@@ -1,169 +1,135 @@
-"""Support for esphome selects."""
+"""SmartVan.io Select platform.
+
+Creates Home Assistant select entities from SmartVan.io device discovery.
+Handles enumerated choices such as sensor orientation.
+
+Topics:
+  State:   smartvanio/{device_id}/select/{channel}/state  -> {"value": "Option 1"}
+  Command: smartvanio/{device_id}/select/{channel}/set    <- {"value": "Option 2"}
+"""
 
 from __future__ import annotations
 
-from aioesphomeapi import EntityInfo, SelectInfo, SelectState
+import json
+import logging
+from typing import Any
 
-from homeassistant.components.assist_pipeline.select import (
-    AssistPipelineSelect,
-    VadSensitivitySelect,
-)
-from homeassistant.components.assist_satellite import AssistSatelliteConfiguration
-from homeassistant.components.select import SelectEntity, SelectEntityDescription
-from homeassistant.const import EntityCategory
+from homeassistant.components import mqtt
+from homeassistant.components.select import SelectEntity
+from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import restore_state
-from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import DOMAIN
-from .entity import (
-    EsphomeAssistEntity,
-    EsphomeEntity,
-    convert_api_error_ha_error,
-    esphome_state_property,
-    platform_async_setup_entry,
-)
-from .entry_data import ESPHomeConfigEntry, RuntimeEntryData
+from .const import DOMAIN, MANUFACTURER, MQTT_TOPIC_PREFIX, MQTT_QOS, ENTITY_TYPE_SELECT
+
+_LOGGER = logging.getLogger(__name__)
 
 
 async def async_setup_entry(
     hass: HomeAssistant,
-    entry: ESPHomeConfigEntry,
-    async_add_entities: AddConfigEntryEntitiesCallback,
+    entry: ConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up esphome selects based on a config entry."""
-    await platform_async_setup_entry(
-        hass,
-        entry,
-        async_add_entities,
-        info_type=SelectInfo,
-        entity_type=EsphomeSelect,
-        state_type=SelectState,
-    )
+    """Set up SmartVan.io select entities from config entry."""
+    store = hass.data[DOMAIN][entry.entry_id]
+    created_entities: set[str] = set()
 
-    entry_data = entry.runtime_data
-    assert entry_data.device_info is not None
-    if entry_data.device_info.voice_assistant_feature_flags_compat(
-        entry_data.api_version
-    ):
-        async_add_entities(
-            [
-                EsphomeAssistPipelineSelect(hass, entry_data),
-                EsphomeVadSensitivitySelect(hass, entry_data),
-                EsphomeAssistSatelliteWakeWordSelect(hass, entry_data),
-            ]
-        )
+    def _create_selects_from_config(device_id: str, config: dict) -> list[SmartVanSelect]:
+        selects = []
+        for entity_config in config.get("entities", []):
+            if entity_config.get("type") != ENTITY_TYPE_SELECT:
+                continue
+            channel = entity_config.get("channel", "unknown")
+            unique_id = f"{device_id}_{channel}"
+            if unique_id in created_entities:
+                continue
+            selects.append(SmartVanSelect(hass, device_id, channel, entity_config, config))
+            created_entities.add(unique_id)
+            _LOGGER.info("Created select entity: %s", unique_id)
+        return selects
 
-
-class EsphomeSelect(EsphomeEntity[SelectInfo, SelectState], SelectEntity):
-    """A select implementation for esphome."""
+    for device_id, config in store.get("pending_configs", {}).items():
+        entities = _create_selects_from_config(device_id, config)
+        if entities:
+            async_add_entities(entities)
 
     @callback
-    def _on_static_info_update(self, static_info: EntityInfo) -> None:
-        """Set attrs from static info."""
-        super()._on_static_info_update(static_info)
-        self._attr_options = self._static_info.options
+    def _on_device_discovered(event) -> None:
+        device_id = event.data.get("device_id")
+        config = event.data.get("config", {})
+        entities = _create_selects_from_config(device_id, config)
+        if entities:
+            async_add_entities(entities)
+
+    hass.bus.async_listen(f"{DOMAIN}_device_discovered", _on_device_discovered)
+
+
+class SmartVanSelect(SelectEntity):
+    """An enumerated choice exposed over MQTT."""
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        device_id: str,
+        channel: str,
+        entity_config: dict[str, Any],
+        device_config: dict[str, Any],
+    ) -> None:
+        self.hass = hass
+        self._device_id = device_id
+        self._channel = channel
+        self._device_config = device_config
+
+        self._attr_unique_id = f"{device_id}_{channel}"
+        self._attr_name = entity_config.get("name", f"Select {channel}")
+        self._attr_options = entity_config.get("options", [])
+        self._attr_current_option = self._attr_options[0] if self._attr_options else None
+        self._attr_available = True
+
+        self._state_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/select/{channel}/state"
+        self._command_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/select/{channel}/set"
+        self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
 
     @property
-    @esphome_state_property
-    def current_option(self) -> str | None:
-        """Return the state of the entity."""
-        state = self._state
-        return None if state.missing_state else state.state
-
-    @convert_api_error_ha_error
-    async def async_select_option(self, option: str) -> None:
-        """Change the selected option."""
-        self._client.select_command(self._key, option)
-
-
-class EsphomeAssistPipelineSelect(EsphomeAssistEntity, AssistPipelineSelect):
-    """Pipeline selector for esphome devices."""
-
-    def __init__(self, hass: HomeAssistant, entry_data: RuntimeEntryData) -> None:
-        """Initialize a pipeline selector."""
-        EsphomeAssistEntity.__init__(self, entry_data)
-        AssistPipelineSelect.__init__(self, hass, DOMAIN, self._device_info.mac_address)
-
-
-class EsphomeVadSensitivitySelect(EsphomeAssistEntity, VadSensitivitySelect):
-    """VAD sensitivity selector for ESPHome devices."""
-
-    def __init__(self, hass: HomeAssistant, entry_data: RuntimeEntryData) -> None:
-        """Initialize a VAD sensitivity selector."""
-        EsphomeAssistEntity.__init__(self, entry_data)
-        VadSensitivitySelect.__init__(self, hass, self._device_info.mac_address)
-
-
-class EsphomeAssistSatelliteWakeWordSelect(
-    EsphomeAssistEntity, SelectEntity, restore_state.RestoreEntity
-):
-    """Wake word selector for esphome devices."""
-
-    entity_description = SelectEntityDescription(
-        key="wake_word",
-        translation_key="wake_word",
-        entity_category=EntityCategory.CONFIG,
-    )
-    _attr_should_poll = False
-    _attr_current_option: str | None = None
-    _attr_options: list[str] = []
-
-    def __init__(self, hass: HomeAssistant, entry_data: RuntimeEntryData) -> None:
-        """Initialize a wake word selector."""
-        EsphomeAssistEntity.__init__(self, entry_data)
-
-        unique_id_prefix = self._device_info.mac_address
-        self._attr_unique_id = f"{unique_id_prefix}-wake_word"
-
-        # name -> id
-        self._wake_words: dict[str, str] = {}
-
-    @property
-    def available(self) -> bool:
-        """Return if entity is available."""
-        return bool(self._attr_options)
-
-    async def async_added_to_hass(self) -> None:
-        """Run when entity about to be added to hass."""
-        await super().async_added_to_hass()
-
-        # Update options when config is updated
-        self.async_on_remove(
-            self._entry_data.async_register_assist_satellite_config_updated_callback(
-                self.async_satellite_config_updated
-            )
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, self._device_id)},
+            name=self._device_config.get("name", f"SmartVan.io {self._device_id}"),
+            manufacturer=MANUFACTURER,
+            model=self._device_config.get("model", "Unknown"),
+            sw_version=self._device_config.get("firmware", "Unknown"),
         )
 
-    async def async_select_option(self, option: str) -> None:
-        """Select an option."""
-        if wake_word_id := self._wake_words.get(option):
-            # _attr_current_option will be updated on
-            # async_satellite_config_updated after the device sets the wake
-            # word.
-            self._entry_data.async_assist_satellite_set_wake_word(wake_word_id)
+    async def async_added_to_hass(self) -> None:
+        @callback
+        def _state_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            value = payload.get("value")
+            if value in self._attr_options:
+                self._attr_current_option = value
+                self.async_write_ha_state()
 
-    def async_satellite_config_updated(
-        self, config: AssistSatelliteConfiguration
-    ) -> None:
-        """Update options with available wake words."""
-        if (not config.available_wake_words) or (config.max_active_wake_words < 1):
-            self._attr_current_option = None
-            self._wake_words.clear()
+        await mqtt.async_subscribe(self.hass, self._state_topic, _state_received, qos=MQTT_QOS)
+
+        @callback
+        def _status_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            self._attr_available = payload.get("state") == "online"
             self.async_write_ha_state()
-            return
 
-        self._wake_words = {w.wake_word: w.id for w in config.available_wake_words}
-        self._attr_options = sorted(self._wake_words)
+        await mqtt.async_subscribe(self.hass, self._status_topic, _status_received, qos=MQTT_QOS)
 
-        if config.active_wake_words:
-            # Select first active wake word
-            wake_word_id = config.active_wake_words[0]
-            for wake_word in config.available_wake_words:
-                if wake_word.id == wake_word_id:
-                    self._attr_current_option = wake_word.wake_word
-        else:
-            # Select first available wake word
-            self._attr_current_option = config.available_wake_words[0].wake_word
-
-        self.async_write_ha_state()
+    async def async_select_option(self, option: str) -> None:
+        await mqtt.async_publish(
+            self.hass, self._command_topic, json.dumps({"value": option}),
+            qos=MQTT_QOS, retain=False,
+        )

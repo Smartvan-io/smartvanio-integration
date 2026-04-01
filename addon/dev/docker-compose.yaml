@@ -1,0 +1,35 @@
+# SmartVan.io Add-on — Dev Environment with Supervisor
+#
+# Uses the official HA devcontainer image with full Supervisor support.
+#
+# Usage:
+#   1. cd addon/smartvanio_setup && bash build_local.sh
+#   2. cd addon/dev && docker compose up -d
+#   3. Wait ~3-5 min for Supervisor + HA to bootstrap
+#   4. Open http://localhost:7123 and complete onboarding
+#   5. Settings → Add-ons → SmartVan.io → Install → Start
+
+services:
+  hassio:
+    image: ghcr.io/home-assistant/devcontainer:2-addons
+    container_name: smartvanio-hassio-dev
+    privileged: true
+    ports:
+      - "7123:8123"
+    volumes:
+      - supervisor_data:/mnt/supervisor
+      - docker_data:/var/lib/docker
+      - ..:/workspaces/addon
+    environment:
+      - WORKSPACE_DIRECTORY=/workspaces/addon
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        bash /usr/bin/devcontainer_bootstrap
+        bash /usr/bin/supervisor_run
+    restart: unless-stopped
+
+volumes:
+  supervisor_data:
+  docker_data:
