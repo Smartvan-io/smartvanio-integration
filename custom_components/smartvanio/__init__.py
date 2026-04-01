@@ -14,6 +14,7 @@ from typing import Any
 from homeassistant.components import mqtt
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
 
 from .const import (
@@ -92,9 +93,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
             {"device_id": device_id, "config": payload},
         )
 
-    await mqtt.async_subscribe(
-        hass, discovery_topic, _handle_discovery, qos=MQTT_QOS
-    )
+    try:
+        await mqtt.async_subscribe(
+            hass, discovery_topic, _handle_discovery, qos=MQTT_QOS
+        )
+    except Exception as err:
+        raise ConfigEntryNotReady(
+            "MQTT is not ready — will retry automatically"
+        ) from err
 
     # Subscribe to status topic for availability tracking
     status_topic = f"{MQTT_TOPIC_PREFIX}/+/{STATUS_TOPIC_SUFFIX}"
@@ -120,9 +126,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
                 {"device_id": device_id, "available": state == "online"},
             )
 
-    await mqtt.async_subscribe(
-        hass, status_topic, _handle_status, qos=MQTT_QOS
-    )
+    try:
+        await mqtt.async_subscribe(
+            hass, status_topic, _handle_status, qos=MQTT_QOS
+        )
+    except Exception as err:
+        raise ConfigEntryNotReady(
+            "MQTT is not ready — will retry automatically"
+        ) from err
 
     # Forward setup to platforms (light, switch, sensor, etc.)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
