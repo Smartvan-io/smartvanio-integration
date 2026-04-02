@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import time
+from datetime import timedelta
 from typing import Any
 
 from homeassistant.components import mqtt
@@ -16,6 +18,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
     DOMAIN,
@@ -44,6 +47,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
     hass.data[DOMAIN][entry.entry_id] = {
         "devices": {},
         "pending_configs": {},
+        "device_availability": {},  # device_id -> {"available": bool, "last_seen": float}
     }
 
     # Subscribe to discovery topic for all smartvanio devices
@@ -104,6 +108,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
 
     # Subscribe to status topic for availability tracking
     status_topic = f"{MQTT_TOPIC_PREFIX}/+/{STATUS_TOPIC_SUFFIX}"
+    availability = store["device_availability"]
 
     @callback
     def _handle_status(msg: mqtt.ReceiveMessage) -> None:
@@ -113,18 +118,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
         except (json.JSONDecodeError, ValueError):
             return
 
-        # Extract device_id from topic: smartvanio/{device_id}/status
         parts = msg.topic.split("/")
         if len(parts) >= 2:
             device_id = parts[1]
-            state = payload.get("state", "offline")
-            _LOGGER.debug("Device %s status: %s", device_id, state)
+            is_online = payload.get("state") == "online"
+            now = time.monotonic()
+            prev = availability.get(device_id, {}).get("available")
+            availability[device_id] = {"available": is_online, "last_seen": now}
 
-            # Fire availability event
-            hass.bus.async_fire(
-                f"{DOMAIN}_device_status",
-                {"device_id": device_id, "available": state == "online"},
-            )
+            if prev != is_online:
+                _LOGGER.debug("Device %s availability: %s", device_id, is_online)
+                hass.bus.async_fire(
+                    f"{DOMAIN}_device_status",
+                    {"device_id": device_id, "available": is_online},
+                )
 
     try:
         await mqtt.async_subscribe(
@@ -134,6 +141,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
         raise ConfigEntryNotReady(
             "MQTT is not ready — will retry automatically"
         ) from err
+
+    # Heartbeat checker — mark devices unavailable if no status in 90s
+    @callback
+    def _check_heartbeats(_now) -> None:
+        now = time.monotonic()
+        for device_id, info in availability.items():
+            if info["available"] and (now - info["last_seen"]) > 90:
+                info["available"] = False
+                _LOGGER.debug("Device %s heartbeat timeout — marking unavailable", device_id)
+                hass.bus.async_fire(
+                    f"{DOMAIN}_device_status",
+                    {"device_id": device_id, "available": False},
+                )
+
+    entry.async_on_unload(
+        async_track_time_interval(hass, _check_heartbeats, timedelta(seconds=30))
+    )
 
     # Forward setup to platforms (light, switch, sensor, etc.)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

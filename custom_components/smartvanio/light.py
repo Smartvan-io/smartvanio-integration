@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
-from datetime import timedelta
 from typing import Any
 
 from homeassistant.components import mqtt
@@ -20,7 +18,6 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from .const import (
@@ -215,7 +212,6 @@ class SmartVanLight(LightEntity):
         self._attr_rgb_color = (255, 255, 255)
         self._attr_available = True
         self._max_leds: int = int(entity_config.get("max_leds", 0))
-        self._last_seen: float = time.monotonic()
 
         # ESPHome publishes light state/commands on native topics (device_id as prefix)
         self._state_topic = f"{device_id}/light/{channel}/state"
@@ -265,14 +261,13 @@ class SmartVanLight(LightEntity):
         await mqtt.async_subscribe(self.hass, self._status_topic, _status_received, qos=MQTT_QOS)
 
         @callback
-        def _check_heartbeat(_now) -> None:
-            elapsed = time.monotonic() - self._last_seen
-            if elapsed > 90 and self._attr_available:
-                self._attr_available = False
+        def _on_availability_changed(event) -> None:
+            if event.data.get("device_id") == self._device_id:
+                self._attr_available = event.data.get("available", False)
                 self.async_write_ha_state()
 
         self.async_on_remove(
-            async_track_time_interval(self.hass, _check_heartbeat, timedelta(seconds=30))
+            self.hass.bus.async_listen(f"{DOMAIN}_device_status", _on_availability_changed)
         )
 
         @callback
@@ -412,7 +407,6 @@ class SmartVanSegmentLight(LightEntity, RestoreEntity):
         self._attr_brightness = 255
         self._attr_rgb_color = (255, 255, 255)
         self._attr_available = True
-        self._last_seen: float = time.monotonic()
 
         self._command_topic = f"{device_id}/light/{channel}/command"
         self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
@@ -451,23 +445,19 @@ class SmartVanSegmentLight(LightEntity, RestoreEntity):
                 payload = json.loads(msg.payload)
             except (json.JSONDecodeError, ValueError):
                 return
-            is_online = payload.get("state") == "online"
-            if is_online:
-                self._last_seen = time.monotonic()
-            self._attr_available = is_online
+            self._attr_available = payload.get("state") == "online"
             self.async_write_ha_state()
 
         await mqtt.async_subscribe(self.hass, self._status_topic, _status_received, qos=MQTT_QOS)
 
         @callback
-        def _check_heartbeat(_now) -> None:
-            elapsed = time.monotonic() - self._last_seen
-            if elapsed > 90 and self._attr_available:
-                self._attr_available = False
+        def _on_availability_changed(event) -> None:
+            if event.data.get("device_id") == self._device_id:
+                self._attr_available = event.data.get("available", False)
                 self.async_write_ha_state()
 
         self.async_on_remove(
-            async_track_time_interval(self.hass, _check_heartbeat, timedelta(seconds=30))
+            self.hass.bus.async_listen(f"{DOMAIN}_device_status", _on_availability_changed)
         )
 
     async def async_turn_on(self, **kwargs: Any) -> None:
