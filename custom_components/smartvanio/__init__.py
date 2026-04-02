@@ -108,6 +108,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
 
     # Subscribe to status topic for availability tracking
     status_topic = f"{MQTT_TOPIC_PREFIX}/+/{STATUS_TOPIC_SUFFIX}"
+    store = hass.data[DOMAIN][entry.entry_id]
     availability = store["device_availability"]
 
     @callback
