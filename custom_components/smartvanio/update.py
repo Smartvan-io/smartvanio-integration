@@ -4,21 +4,23 @@ Exposes firmware update entities for SmartVan.io devices. Checks a GitHub-hosted
 manifest per device type to determine if a newer firmware is available, and
 triggers OTA flashing via MQTT when the user installs.
 
-Manifest URL pattern:
-  https://raw.githubusercontent.com/{org}/{type}.bin/refs/heads/{branch}/manifest.json
+OTA flow:
+  1. HA downloads firmware.bin + hash.txt from GitHub
+  2. Saves to /config/www/smartvanio/ota/{firmware_type}/
+  3. Publishes MQTT to {device_name}/ota/update with local HA URL
+  4. Device pulls firmware over plain HTTP from HA on the LAN
 
-Manifest format:
-  {"version": "1.1.0", "release_notes": "Fixed calibration persistence"}
-
-OTA trigger:
-  Publishes to {device_name}/ota/update with {"url": "...", "md5_url": "..."}
-  The device subscribes to this topic and flashes the provided URL.
+OTA progress:
+  Device publishes to smartvanio/{device_name}/ota/state with:
+    {"state": "downloading|flashing|done|error", "progress": 0-100, "error": "..."}
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 from typing import Any
 
 from homeassistant.components import mqtt
@@ -31,6 +33,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.network import get_url
 
 from .const import (
     DOMAIN,
@@ -45,6 +48,8 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+OTA_SERVE_DIR = "/config/www/smartvanio/ota"
+
 
 def _build_manifest_url(firmware_type: str, branch: str) -> str:
     return (
@@ -54,14 +59,15 @@ def _build_manifest_url(firmware_type: str, branch: str) -> str:
     )
 
 
-def _build_firmware_url(firmware_type: str, branch: str) -> str:
+def _build_github_firmware_url(firmware_type: str, branch: str) -> str:
     return (
-        f"https://github.com/{FIRMWARE_GITHUB_ORG}/{firmware_type}.bin/"
-        f"raw/refs/heads/{branch}/firmware.bin"
+        f"https://raw.githubusercontent.com/"
+        f"{FIRMWARE_GITHUB_ORG}/{firmware_type}.bin/"
+        f"refs/heads/{branch}/firmware.bin"
     )
 
 
-def _build_md5_url(firmware_type: str, branch: str) -> str:
+def _build_github_md5_url(firmware_type: str, branch: str) -> str:
     return (
         f"https://raw.githubusercontent.com/"
         f"{FIRMWARE_GITHUB_ORG}/{firmware_type}.bin/"
@@ -87,11 +93,16 @@ async def async_setup_entry(
 
         unique_id = f"{device_id}_firmware"
         if unique_id in created_entities:
-            # Update current version if device reported a new one
             existing = created_entities[unique_id]
             new_ver = config.get("firmware")
             if new_ver and new_ver != existing._attr_installed_version:
                 existing._attr_installed_version = new_ver
+                if existing._attr_in_progress is not False:
+                    existing._attr_in_progress = False
+                    _LOGGER.info(
+                        "OTA complete for %s — now running %s",
+                        device_id, new_ver,
+                    )
                 existing.async_write_ha_state()
             return []
 
@@ -123,6 +134,7 @@ class SmartVanUpdate(UpdateEntity):
     _attr_supported_features = (
         UpdateEntityFeature.INSTALL
         | UpdateEntityFeature.RELEASE_NOTES
+        | UpdateEntityFeature.PROGRESS
     )
 
     def __init__(
@@ -143,9 +155,11 @@ class SmartVanUpdate(UpdateEntity):
         self._attr_installed_version = device_config.get("firmware")
         self._attr_latest_version = None
         self._attr_available = True
+        self._attr_in_progress: bool | int = False
         self._release_notes: str | None = None
 
         self._ota_topic = f"{device_id}/ota/update"
+        self._ota_state_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/ota/state"
         self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
 
     @property
@@ -170,18 +184,49 @@ class SmartVanUpdate(UpdateEntity):
                 payload = json.loads(msg.payload)
             except (json.JSONDecodeError, ValueError):
                 return
-            self._attr_available = payload.get("state") == "online"
+            online = payload.get("state") == "online"
+            self._attr_available = online
+            # Device came back online after OTA — clear progress
+            if online and self._attr_in_progress is not False:
+                self._attr_in_progress = False
+                _LOGGER.info(
+                    "OTA %s: device back online after update",
+                    self._device_id,
+                )
             self.async_write_ha_state()
 
         await mqtt.async_subscribe(
             self.hass, self._status_topic, _status_received, qos=MQTT_QOS
         )
 
-        # Fetch manifest on startup
+        @callback
+        def _ota_state_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                payload = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+
+            state = payload.get("state", "")
+            progress = payload.get("progress")
+
+            if state in ("downloading", "flashing"):
+                self._attr_in_progress = True
+            elif state == "done":
+                self._attr_in_progress = False
+                _LOGGER.info("OTA %s: flash complete, device rebooting", self._device_id)
+            elif state == "error":
+                self._attr_in_progress = False
+                _LOGGER.error("OTA %s failed: %s", self._device_id, payload.get("error", "unknown"))
+
+            self.async_write_ha_state()
+
+        await mqtt.async_subscribe(
+            self.hass, self._ota_state_topic, _ota_state_received, qos=MQTT_QOS
+        )
+
         await self._fetch_manifest()
 
     async def async_update(self) -> None:
-        """Poll for new firmware version (called by HA periodically)."""
         await self._fetch_manifest()
 
     async def _fetch_manifest(self) -> None:
@@ -217,22 +262,103 @@ class SmartVanUpdate(UpdateEntity):
         parts.append(f"Device type: `{self._firmware_type}`")
         return "\n\n".join(parts)
 
+    async def _download_firmware(self) -> tuple[str, str]:
+        """Download firmware from GitHub and save locally for devices to pull."""
+        branch = self._branch
+        fw_url = _build_github_firmware_url(self._firmware_type, branch)
+        md5_url = _build_github_md5_url(self._firmware_type, branch)
+
+        serve_dir = os.path.join(OTA_SERVE_DIR, self._firmware_type)
+        os.makedirs(serve_dir, exist_ok=True)
+
+        session = async_get_clientsession(self.hass)
+
+        # Download firmware binary
+        fw_path = os.path.join(serve_dir, "firmware.bin")
+        async with session.get(fw_url, timeout=120) as resp:
+            if resp.status != 200:
+                raise Exception(f"Failed to download firmware: HTTP {resp.status}")
+            data = await resp.read()
+            await self.hass.async_add_executor_job(self._write_file, fw_path, data)
+            _LOGGER.info(
+                "Downloaded firmware for %s: %d bytes",
+                self._firmware_type, len(data),
+            )
+
+        # Download hash
+        md5_path = os.path.join(serve_dir, "hash.txt")
+        async with session.get(md5_url, timeout=15) as resp:
+            if resp.status != 200:
+                raise Exception(f"Failed to download hash: HTTP {resp.status}")
+            data = await resp.read()
+            await self.hass.async_add_executor_job(self._write_file, md5_path, data)
+
+        # Build local URLs for devices
+        # /local/ maps to /config/www/ in HA
+        local_fw = f"/local/smartvanio/ota/{self._firmware_type}/firmware.bin"
+        local_md5 = f"/local/smartvanio/ota/{self._firmware_type}/hash.txt"
+
+        return local_fw, local_md5
+
+    @staticmethod
+    def _write_file(path: str, data: bytes) -> None:
+        with open(path, "wb") as f:
+            f.write(data)
+
+    def _get_ha_base_url(self) -> str:
+        """Get HA's local network URL for devices to reach."""
+        try:
+            return get_url(self.hass, prefer_external=False)
+        except Exception:
+            _LOGGER.warning(
+                "Could not determine HA internal URL — "
+                "set 'internal_url' in configuration.yaml"
+            )
+            raise
+
     async def async_install(
         self, version: str | None, backup: bool, **kwargs: Any
     ) -> None:
-        """Trigger OTA update on the device via MQTT."""
-        branch = self._branch
-        fw_url = _build_firmware_url(self._firmware_type, branch)
-        md5_url = _build_md5_url(self._firmware_type, branch)
+        """Download firmware from GitHub, serve locally, trigger OTA via MQTT."""
+        self._attr_in_progress = True
+        self.async_write_ha_state()
 
-        payload = json.dumps({"url": fw_url, "md5_url": md5_url})
+        try:
+            # Step 1: Download firmware from GitHub to local www dir
+            local_fw_path, local_md5_path = await self._download_firmware()
 
-        _LOGGER.info(
-            "Triggering OTA update for %s from %s",
-            self._device_id, fw_url,
-        )
+            # Step 2: Build full URLs using HA's base URL
+            base = self._get_ha_base_url()
+            fw_url = f"{base}{local_fw_path}"
+            md5_url = f"{base}{local_md5_path}"
 
-        await mqtt.async_publish(
-            self.hass, self._ota_topic, payload,
-            qos=MQTT_QOS, retain=False,
-        )
+            _LOGGER.info(
+                "Triggering OTA for %s — firmware served at %s",
+                self._device_id, fw_url,
+            )
+
+            # Step 3: Tell device to pull from HA
+            payload = json.dumps({"url": fw_url, "md5_url": md5_url})
+            await mqtt.async_publish(
+                self.hass, self._ota_topic, payload,
+                qos=MQTT_QOS, retain=False,
+            )
+
+        except Exception as err:
+            _LOGGER.error("OTA failed for %s: %s", self._device_id, err)
+            self._attr_in_progress = False
+            self.async_write_ha_state()
+            return
+
+        # Timeout guard — reset progress if no response in 120s
+        async def _timeout_guard():
+            await asyncio.sleep(120)
+            if self._attr_in_progress is not False:
+                _LOGGER.warning(
+                    "OTA timeout for %s — no progress in 120s",
+                    self._device_id,
+                )
+                self._attr_in_progress = False
+                self.async_write_ha_state()
+
+        self.hass.async_create_task(_timeout_guard())

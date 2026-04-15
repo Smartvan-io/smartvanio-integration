@@ -1,13 +1,12 @@
-ARG BUILD_FROM
+ARG BUILD_FROM=ghcr.io/home-assistant/aarch64-base:3.21
 FROM ${BUILD_FROM}
 
 # Install runtime dependencies
-RUN apk add --no-cache bash curl jq
+RUN apk add --no-cache git python3 py3-yaml
 
-# Copy add-on files
+# Copy all app files in one layer
 COPY run.sh /
-COPY integration/ /opt/smartvanio/integration/
-COPY cards/ /opt/smartvanio/cards/
+COPY configure_yaml.py /opt/smartvanio/configure_yaml.py
 COPY dashboards/ /opt/smartvanio/dashboards/
 
 RUN chmod a+x /run.sh

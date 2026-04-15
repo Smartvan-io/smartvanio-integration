@@ -1,55 +1,46 @@
-#!/bin/bash
-# SmartVan.io Setup Add-on
-# Installs integration, cards, and dashboard into Home Assistant.
+#!/usr/bin/with-contenv bashio
+# SmartVan.io Setup App
+# Provisions the full SmartVan.io stack into Home Assistant:
+#   - Mosquitto MQTT broker
+#   - SmartVan.io integration (from GitHub)
+#   - Dashboard cards (from GitHub)
+#   - Lovelace dashboard + kiosk mode
+#   - MQTT + SmartVan.io config entries
 #
-# Runs in two modes:
-#   1. Supervisor mode (production) — uses bashio + SUPERVISOR_TOKEN
-#   2. Standalone mode (dev) — plain bash, file install only
-
-set -e
+# The bashio shebang loads s6 env vars (SUPERVISOR_TOKEN) and the
+# bashio library automatically. No need to source bashio manually.
 
 # ── Detect environment ───────────────────────────────────────
 
-if [ -f /usr/bin/bashio ] && [ -n "$SUPERVISOR_TOKEN" ]; then
+if [ -n "${SUPERVISOR_TOKEN:-}" ]; then
     MODE="supervisor"
-    # Source bashio for logging helpers
-    source /usr/bin/bashio 2>/dev/null || true
-    log_info() { bashio::log.info "$@"; }
-    log_warn() { bashio::log.warning "$@"; }
-    log_error() { bashio::log.error "$@"; }
-    get_config() { bashio::config "$1"; }
 else
     MODE="standalone"
-    log_info() { echo "[INFO]  $*"; }
-    log_warn() { echo "[WARN]  $*"; }
-    log_error() { echo "[ERROR] $*"; }
-    get_config() {
-        # Read from /data/options.json if available (Supervisor), otherwise use defaults
-        if [ -f /data/options.json ]; then
-            jq -r ".$1 // empty" /data/options.json 2>/dev/null
-        fi
-    }
 fi
 
-log_info "============================================="
-log_info "  SmartVan.io Setup (mode: ${MODE})"
-log_info "============================================="
+bashio::log.info "============================================="
+bashio::log.info "  SmartVan.io Setup (mode: ${MODE})"
+bashio::log.info "============================================="
 
-MQTT_USER=$(get_config 'mqtt_user')
-MQTT_PASSWORD=$(get_config 'mqtt_password')
+MQTT_USER=$(bashio::config 'mqtt_user' 2>/dev/null || echo "")
+MQTT_PASSWORD=$(bashio::config 'mqtt_password' 2>/dev/null || echo "")
 MQTT_USER="${MQTT_USER:-smartvanio}"
 MQTT_PASSWORD="${MQTT_PASSWORD:-smartvanio123}"
+
+INTEGRATION_REPO="https://github.com/Smartvan-io/smartvanio-integration.git"
+INTEGRATION_BRANCH="beta"
+CARD_BASE_URL="https://raw.githubusercontent.com/Smartvan-io/smartvanio-main-card/refs/heads/beta"
 
 # ── Helpers ──────────────────────────────────────────────────
 
 ha_api() {
     local method="$1"
     local endpoint="$2"
-    local data="$3"
+    local data="${3:-}"
 
     if [ "$MODE" = "supervisor" ]; then
         local url="http://supervisor/core/api${endpoint}"
-        local token="$SUPERVISOR_TOKEN"
+        local token="${SUPERVISOR_TOKEN:-}"
     else
         local url="${HA_URL:-http://homeassistant:8123}/api${endpoint}"
         local token="${HA_TOKEN:-}"
@@ -74,62 +65,109 @@ ha_api() {
 }
 
 wait_for_ha() {
-    log_info "Waiting for Home Assistant API..."
+    bashio::log.info "Waiting for Home Assistant API..."
     for i in $(seq 1 60); do
         RESULT=$(ha_api GET "/" 2>/dev/null || echo "")
         if echo "$RESULT" | grep -q "API running"; then
-            log_info "  Home Assistant API is ready"
+            bashio::log.info "  Home Assistant API is ready"
             return 0
         fi
         sleep 2
     done
-    log_warn "  Home Assistant API not available"
+    bashio::log.warning "  Home Assistant API not available after 120s"
     return 1
 }
 
-# ── Step 1: Install integration ──────────────────────────────
+# ── Step 1: Provision Mosquitto ──────────────────────────────
 
-log_info ""
-log_info "Step 1/4: Installing SmartVan.io integration..."
+bashio::log.info ""
+bashio::log.info "Step 1/5: Provisioning MQTT broker..."
+
+if [ "$MODE" = "supervisor" ]; then
+    MOSQUITTO_SLUG="core_mosquitto"
+
+    if bashio::addons.installed "${MOSQUITTO_SLUG}" 2>/dev/null; then
+        bashio::log.info "  Mosquitto app already installed"
+    else
+        bashio::log.info "  Installing Mosquitto app..."
+        bashio::addon.install "${MOSQUITTO_SLUG}" 2>/dev/null || {
+            bashio::log.error "  Failed to install Mosquitto — install it manually from the App Store"
+        }
+        sleep 10
+    fi
+
+    # Ensure it's running
+    ADDON_STATE=$(bashio::addons.info "${MOSQUITTO_SLUG}" "state" 2>/dev/null || echo "unknown")
+    if [ "${ADDON_STATE}" != "started" ]; then
+        bashio::log.info "  Starting Mosquitto..."
+        bashio::addon.start "${MOSQUITTO_SLUG}" 2>/dev/null || true
+        sleep 5
+    fi
+    bashio::log.info "  Mosquitto is running"
+    MQTT_HOST="core-mosquitto"
+else
+    bashio::log.info "  Skipping Mosquitto install (standalone mode)"
+    MQTT_HOST="localhost"
+fi
+
+# ── Step 2: Install integration from GitHub ──────────────────
+
+bashio::log.info ""
+bashio::log.info "Step 2/5: Installing SmartVan.io integration..."
 
 INTEGRATION_DIR="/config/custom_components/smartvanio"
-SRC_DIR="/opt/smartvanio/integration"
+TMP_DIR=$(mktemp -d)
 
-if [ -d "$SRC_DIR" ] && [ "$(ls -A "$SRC_DIR" 2>/dev/null)" ]; then
+bashio::log.info "  Cloning ${INTEGRATION_BRANCH} branch..."
+if git clone --depth 1 --branch "$INTEGRATION_BRANCH" "$INTEGRATION_REPO" "$TMP_DIR" 2>/dev/null; then
+    rm -rf "$INTEGRATION_DIR"
     mkdir -p "$INTEGRATION_DIR"
-    cp -r "$SRC_DIR"/* "$INTEGRATION_DIR"/
-    log_info "  Installed to ${INTEGRATION_DIR}"
-    ls "$INTEGRATION_DIR" | head -5
-    log_info "  ($(ls "$INTEGRATION_DIR" | wc -l | tr -d ' ') files)"
+    cp -r "$TMP_DIR/custom_components/smartvanio/"* "$INTEGRATION_DIR"/
+    rm -rf "$TMP_DIR"
+    bashio::log.info "  Installed to ${INTEGRATION_DIR}"
+    bashio::log.info "  ($(ls "$INTEGRATION_DIR" | wc -l | tr -d ' ') files)"
 else
-    log_error "  Integration source files not found!"
+    rm -rf "$TMP_DIR"
+    bashio::log.error "  Failed to clone integration from GitHub"
+    bashio::log.error "  Check network connectivity and try again"
     exit 1
 fi
 
-# ── Step 2: Install card resources ───────────────────────────
+# ── Step 3: Install dashboard cards from GitHub ──────────────
 
-log_info ""
-log_info "Step 2/4: Installing dashboard cards..."
+bashio::log.info ""
+bashio::log.info "Step 3/5: Installing dashboard cards..."
 
 CARDS_DIR="/config/www/smartvanio"
-SRC_CARDS="/opt/smartvanio/cards"
-
 mkdir -p "$CARDS_DIR"
 
-if [ -d "$SRC_CARDS" ] && [ "$(ls -A "$SRC_CARDS" 2>/dev/null)" ]; then
-    cp -r "$SRC_CARDS"/* "$CARDS_DIR"/
-    log_info "  Installed to ${CARDS_DIR}"
-    ls -lh "$CARDS_DIR"
+# Main card
+bashio::log.info "  Downloading smartvanio-main-card.js..."
+if curl -sL "${CARD_BASE_URL}/index.js" -o "${CARDS_DIR}/smartvanio-main-card.js"; then
+    CARD_SIZE=$(wc -c < "${CARDS_DIR}/smartvanio-main-card.js" | tr -d ' ')
+    if [ "$CARD_SIZE" -gt 1000 ]; then
+        bashio::log.info "  smartvanio-main-card.js (${CARD_SIZE} bytes)"
+    else
+        bashio::log.error "  smartvanio-main-card.js download looks too small (${CARD_SIZE} bytes)"
+    fi
 else
-    log_error "  Card source files not found!"
-    exit 1
+    bashio::log.error "  Failed to download main card"
 fi
 
-# ── Step 3: Install dashboard YAML ──────────────────────────
+# Kiosk mode
+bashio::log.info "  Downloading kiosk-mode.js..."
+if curl -sL "${CARD_BASE_URL}/kiosk-mode.js" -o "${CARDS_DIR}/kiosk-mode.js"; then
+    bashio::log.info "  kiosk-mode.js downloaded"
+else
+    bashio::log.warning "  Failed to download kiosk-mode.js — kiosk mode will not be available"
+fi
 
-log_info ""
-log_info "Step 3/4: Installing dashboard..."
+# ── Step 4: Install dashboard + configure lovelace ───────────
 
+bashio::log.info ""
+bashio::log.info "Step 4/5: Installing dashboard..."
+
+# Copy dashboard YAML
 DASHBOARDS_DIR="/config/dashboards"
 SRC_DASHBOARDS="/opt/smartvanio/dashboards"
 
@@ -137,22 +175,23 @@ mkdir -p "$DASHBOARDS_DIR"
 
 if [ -f "$SRC_DASHBOARDS/smartvanio.yaml" ]; then
     cp "$SRC_DASHBOARDS/smartvanio.yaml" "$DASHBOARDS_DIR/smartvanio.yaml"
-    log_info "  Installed dashboards/smartvanio.yaml"
+    bashio::log.info "  Installed dashboards/smartvanio.yaml"
 else
-    log_warn "  Dashboard YAML not found — skipping"
+    bashio::log.warning "  Dashboard YAML not found — skipping"
 fi
 
-# Ensure configuration.yaml has the dashboard + resource entries
+# Safely merge lovelace config into configuration.yaml
 CONFIG_FILE="/config/configuration.yaml"
 if [ -f "$CONFIG_FILE" ]; then
-    # Check if our dashboard is already registered
-    if grep -q "smartvan-io:" "$CONFIG_FILE" 2>/dev/null; then
-        log_info "  Dashboard already registered in configuration.yaml"
+    if python3 /opt/smartvanio/configure_yaml.py "$CONFIG_FILE" 2>/dev/null; then
+        bashio::log.info "  Lovelace config merged into configuration.yaml"
     else
-        log_info "  Adding SmartVan.io dashboard to configuration.yaml..."
-        cat >> "$CONFIG_FILE" <<'YAMLEOF'
+        bashio::log.warning "  Python YAML merge failed — trying fallback append"
+        # Fallback: append only if our dashboard isn't already registered
+        if ! grep -q "smartvan-io:" "$CONFIG_FILE" 2>/dev/null; then
+            cat >> "$CONFIG_FILE" <<'YAMLEOF'
 
-# SmartVan.io — added by setup add-on
+# SmartVan.io — added by setup app
 lovelace:
   mode: yaml
   resources:
@@ -168,54 +207,40 @@ lovelace:
       show_in_sidebar: true
       filename: dashboards/smartvanio.yaml
 YAMLEOF
-        log_info "  Added lovelace config to configuration.yaml"
+            bashio::log.info "  Added lovelace config (fallback append)"
+        else
+            bashio::log.info "  Dashboard already registered in configuration.yaml"
+        fi
     fi
 else
-    log_warn "  configuration.yaml not found at ${CONFIG_FILE}"
+    bashio::log.warning "  configuration.yaml not found at ${CONFIG_FILE}"
 fi
 
-# ── Step 4: Configure integrations (Supervisor mode only) ────
+# ── Step 5: Configure integrations (Supervisor mode only) ────
 
-log_info ""
-log_info "Step 4/4: Configuring integrations..."
+bashio::log.info ""
+bashio::log.info "Step 5/5: Configuring integrations..."
 
 if [ "$MODE" = "supervisor" ]; then
-    # ── Check MQTT broker ────────────────────────────────────
-    MOSQUITTO_SLUG="core_mosquitto"
-    if bashio::addons.installed "${MOSQUITTO_SLUG}" 2>/dev/null; then
-        log_info "  Mosquitto add-on is installed"
-        ADDON_STATE=$(bashio::addons.info "${MOSQUITTO_SLUG}" "state" 2>/dev/null || echo "unknown")
-        if [ "${ADDON_STATE}" != "started" ]; then
-            log_warn "  Starting Mosquitto..."
-            bashio::addon.start "${MOSQUITTO_SLUG}" 2>/dev/null || true
-            sleep 5
-        fi
-        MQTT_HOST="core-mosquitto"
-    else
-        log_warn "  Mosquitto add-on not installed"
-        log_warn "  Install it from the Add-on Store, then re-run this add-on"
-        MQTT_HOST="localhost"
-    fi
-
     if wait_for_ha; then
-        # Register Lovelace resources via API (in case storage mode is used)
+        # Register Lovelace resources via API (for storage mode users)
         EXISTING=$(ha_api GET "/config/lovelace/resources" 2>/dev/null || echo "[]")
 
         KIOSK_EXISTS=$(echo "$EXISTING" | jq -r '[.[] | select(.url | contains("kiosk-mode"))] | length' 2>/dev/null || echo "0")
         if [ "$KIOSK_EXISTS" = "0" ]; then
             ha_api POST "/config/lovelace/resources" \
                 '{"res_type":"module","url":"/local/smartvanio/kiosk-mode.js"}' >/dev/null 2>&1 || true
-            log_info "  Registered kiosk-mode.js resource"
+            bashio::log.info "  Registered kiosk-mode.js resource"
         fi
 
         MAIN_CARD_EXISTS=$(echo "$EXISTING" | jq -r '[.[] | select(.url | contains("smartvanio-main-card"))] | length' 2>/dev/null || echo "0")
         if [ "$MAIN_CARD_EXISTS" = "0" ]; then
             ha_api POST "/config/lovelace/resources" \
                 '{"res_type":"module","url":"/local/smartvanio/smartvanio-main-card.js"}' >/dev/null 2>&1 || true
-            log_info "  Registered smartvanio-main-card.js resource"
+            bashio::log.info "  Registered smartvanio-main-card.js resource"
         fi
 
-        # Configure MQTT
+        # Configure MQTT integration
         ENTRIES=$(ha_api GET "/config/config_entries/entry" 2>/dev/null || echo "[]")
         MQTT_EXISTS=$(echo "$ENTRIES" | jq -r '[.[] | select(.domain == "mqtt")] | length' 2>/dev/null || echo "0")
 
@@ -228,13 +253,13 @@ if [ "$MODE" = "supervisor" ]; then
                     "{\"broker\":\"${MQTT_HOST}\",\"port\":1883,\"username\":\"${MQTT_USER}\",\"password\":\"${MQTT_PASSWORD}\"}" 2>/dev/null)
                 RESULT_TYPE=$(echo "$RESULT" | jq -r '.type // empty' 2>/dev/null)
                 if [ "$RESULT_TYPE" = "create_entry" ]; then
-                    log_info "  MQTT configured (broker: ${MQTT_HOST})"
+                    bashio::log.info "  MQTT configured (broker: ${MQTT_HOST})"
                 else
-                    log_warn "  MQTT config flow: ${RESULT_TYPE} — configure manually"
+                    bashio::log.warning "  MQTT config flow: ${RESULT_TYPE} — configure manually"
                 fi
             fi
         else
-            log_info "  MQTT already configured"
+            bashio::log.info "  MQTT already configured"
         fi
 
         # Configure SmartVan.io integration
@@ -242,7 +267,6 @@ if [ "$MODE" = "supervisor" ]; then
         SV_EXISTS=$(echo "$ENTRIES" | jq -r '[.[] | select(.domain == "smartvanio")] | length' 2>/dev/null || echo "0")
 
         if [ "$SV_EXISTS" = "0" ]; then
-            # May need HA restart to detect the new custom component
             FLOW=$(ha_api POST "/config/config_entries/flow" \
                 '{"handler":"smartvanio","show_advanced_options":false}' 2>/dev/null || echo "")
             FLOW_ID=$(echo "$FLOW" | jq -r '.flow_id // empty' 2>/dev/null)
@@ -252,13 +276,14 @@ if [ "$MODE" = "supervisor" ]; then
                     '{"mqtt_prefix":"smartvanio"}' 2>/dev/null)
                 RESULT_TYPE=$(echo "$RESULT" | jq -r '.type // empty' 2>/dev/null)
                 if [ "$RESULT_TYPE" = "create_entry" ]; then
-                    log_info "  SmartVan.io integration configured"
+                    bashio::log.info "  SmartVan.io integration configured"
                 else
-                    log_warn "  SmartVan.io config: ${RESULT_TYPE}"
-                    log_warn "  Restart HA, then re-run this add-on"
+                    bashio::log.warning "  SmartVan.io config: ${RESULT_TYPE}"
+                    bashio::log.warning "  Restart HA, then re-run this app"
                 fi
             else
-                log_info "  Requesting HA restart to load the integration..."
+                # Integration not yet loaded — restart HA and retry
+                bashio::log.info "  Requesting HA restart to load the integration..."
                 ha_api POST "/services/homeassistant/restart" '{}' >/dev/null 2>&1 || true
                 sleep 30
                 if wait_for_ha; then
@@ -268,38 +293,36 @@ if [ "$MODE" = "supervisor" ]; then
                     if [ -n "$FLOW_ID" ]; then
                         ha_api POST "/config/config_entries/flow/${FLOW_ID}" \
                             '{"mqtt_prefix":"smartvanio"}' >/dev/null 2>&1 || true
-                        log_info "  SmartVan.io integration configured after restart"
+                        bashio::log.info "  SmartVan.io integration configured after restart"
                     fi
                 fi
             fi
         else
-            log_info "  SmartVan.io already configured"
+            bashio::log.info "  SmartVan.io already configured"
         fi
     fi
 else
-    log_info "  Skipping API configuration (standalone mode)"
-    log_info "  Restart HA to load the integration, then configure via UI:"
-    log_info "    1. Settings -> Devices & Services -> Add Integration -> MQTT"
-    log_info "    2. Settings -> Devices & Services -> Add Integration -> SmartVan.io"
+    bashio::log.info "  Skipping API configuration (standalone mode)"
+    bashio::log.info "  Restart HA to load the integration, then configure via UI:"
+    bashio::log.info "    1. Settings -> Devices & Services -> Add Integration -> MQTT"
+    bashio::log.info "    2. Settings -> Devices & Services -> Add Integration -> SmartVan.io"
 fi
 
 # ── Summary ──────────────────────────────────────────────────
 
-log_info ""
-log_info "============================================="
-log_info "  SmartVan.io setup complete!"
-log_info ""
-log_info "  Installed:"
-log_info "    Integration: /config/custom_components/smartvanio/"
-log_info "    Cards:       /config/www/smartvanio/"
-log_info "    Dashboard:   /config/dashboards/smartvanio.yaml"
-log_info ""
+bashio::log.info ""
+bashio::log.info "============================================="
+bashio::log.info "  SmartVan.io setup complete!"
+bashio::log.info ""
+bashio::log.info "  Installed:"
+bashio::log.info "    Integration: /config/custom_components/smartvanio/"
+bashio::log.info "    Cards:       /config/www/smartvanio/"
+bashio::log.info "    Dashboard:   /config/dashboards/smartvanio.yaml"
+bashio::log.info ""
 if [ "$MODE" = "standalone" ]; then
-    log_info "  Restart HA to pick up the changes."
+    bashio::log.info "  Restart HA to pick up the changes."
 fi
-log_info "============================================="
+bashio::log.info "============================================="
 
-# In Supervisor mode, keep alive for log viewing
-if [ "$MODE" = "supervisor" ]; then
-    while true; do sleep 3600; done
-fi
+# Keep alive for log viewing (required for addon containers)
+while true; do sleep 3600; done

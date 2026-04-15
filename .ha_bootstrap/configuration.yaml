@@ -5,6 +5,7 @@ homeassistant:
   unit_system: metric
   currency: GBP
   time_zone: Europe/London
+  internal_url: "http://192.168.0.16:8124"
 
 # Enable default_config for standard HA functionality
 default_config:
