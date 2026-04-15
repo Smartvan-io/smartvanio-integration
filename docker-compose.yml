@@ -1,6 +1,6 @@
 services:
   homeassistant:
-    image: ghcr.io/home-assistant/home-assistant:2026.1.3
+    image: ghcr.io/home-assistant/home-assistant:2026.4.1
     container_name: smartvanio-dev-ha
     restart: unless-stopped
     privileged: true
@@ -9,11 +9,16 @@ services:
     volumes:
       - ha_config:/config
       - ./.ha_bootstrap/configuration.yaml:/config/configuration.yaml
+      - ./.ha_bootstrap/scenes.yaml:/config/scenes.bootstrap.yaml
+      - ./.ha_bootstrap/automations.yaml:/config/automations.bootstrap.yaml
       - ./custom_components/smartvanio:/config/custom_components/smartvanio
       - ../smartvan.io-cards/main-card/index.js:/config/www/smartvanio-main-card.js:ro
       - ../smartvan.io-cards/main-card/kiosk-mode.js:/config/www/kiosk-mode.js:ro
       - ./.ha_bootstrap/dashboards:/config/dashboards:ro
       - ./.ha_bootstrap/ui-lovelace.yaml:/config/ui-lovelace.yaml:ro
+    entrypoint: /bin/bash
+    command: >
+      -c "test -f /config/scenes.yaml || cp /config/scenes.bootstrap.yaml /config/scenes.yaml; test -f /config/automations.yaml || cp /config/automations.bootstrap.yaml /config/automations.yaml; exec /init"
     environment:
       - TZ=Europe/London
     depends_on:

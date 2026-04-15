@@ -93,8 +93,8 @@ class SmartVanNumber(NumberEntity):
         self._attr_native_value = entity_config.get("min", 0)
         self._attr_available = True
 
-        self._state_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/number/{channel}/state"
-        self._command_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/number/{channel}/set"
+        self._state_topic = f"{device_id}/number/{channel}/state"
+        self._command_topic = f"{device_id}/number/{channel}/command"
         self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
 
     @property
@@ -110,13 +110,19 @@ class SmartVanNumber(NumberEntity):
     async def async_added_to_hass(self) -> None:
         @callback
         def _state_received(msg: mqtt.ReceiveMessage) -> None:
+            raw = msg.payload
             try:
-                payload = json.loads(msg.payload)
+                payload = json.loads(raw)
+                if isinstance(payload, dict) and "value" in payload:
+                    self._attr_native_value = float(payload["value"])
+                else:
+                    self._attr_native_value = float(raw)
             except (json.JSONDecodeError, ValueError):
-                return
-            if "value" in payload:
-                self._attr_native_value = float(payload["value"])
-                self.async_write_ha_state()
+                try:
+                    self._attr_native_value = float(raw)
+                except (ValueError, TypeError):
+                    return
+            self.async_write_ha_state()
 
         await mqtt.async_subscribe(self.hass, self._state_topic, _state_received, qos=MQTT_QOS)
 
@@ -133,6 +139,6 @@ class SmartVanNumber(NumberEntity):
 
     async def async_set_native_value(self, value: float) -> None:
         await mqtt.async_publish(
-            self.hass, self._command_topic, json.dumps({"value": value}),
+            self.hass, self._command_topic, str(value),
             qos=MQTT_QOS, retain=False,
         )

@@ -5,20 +5,78 @@
         "title": "Set up SmartVan.io",
         "description": "Connect to your SmartVan.io devices via MQTT. Make sure MQTT is already configured in Home Assistant.",
         "data": {
-          "mqtt_prefix": "MQTT topic prefix"
+          "mqtt_prefix": "MQTT topic prefix",
+          "beta_channel": "Beta firmware channel"
         },
         "data_description": {
-          "mqtt_prefix": "The MQTT topic prefix used by your SmartVan.io devices. Default is 'smartvanio'. Only change this if you have a custom setup."
+          "mqtt_prefix": "The MQTT topic prefix used by your SmartVan.io devices. Default is 'smartvanio'. Only change this if you have a custom setup.",
+          "beta_channel": "Enable to receive beta firmware updates. Disable for stable releases only."
         }
+      },
+      "bluetooth_confirm": {
+        "title": "Configure {name}",
+        "description": "A SmartVan.io device was discovered via Bluetooth. Enter your WiFi and MQTT details to provision the device.",
+        "data": {
+          "wifi_ssid": "WiFi network name",
+          "wifi_password": "WiFi password",
+          "mqtt_broker": "MQTT broker address",
+          "mqtt_username": "MQTT username",
+          "mqtt_password": "MQTT password"
+        },
+        "data_description": {
+          "wifi_ssid": "The WiFi network the device should connect to",
+          "wifi_password": "WiFi network password",
+          "mqtt_broker": "IP address of your MQTT broker",
+          "mqtt_username": "Username for MQTT authentication",
+          "mqtt_password": "Password for MQTT authentication"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Configure {name}",
+        "description": "A SmartVan.io device was found on your network. Enter your MQTT broker details to complete setup.",
+        "data": {
+          "mqtt_broker": "MQTT broker address",
+          "mqtt_username": "MQTT username",
+          "mqtt_password": "MQTT password"
+        },
+        "data_description": {
+          "mqtt_broker": "IP address of your MQTT broker",
+          "mqtt_username": "Username for MQTT authentication",
+          "mqtt_password": "Password for MQTT authentication"
+        }
+      },
+      "await_mqtt": {
+        "title": "Waiting for {name}",
+        "description": "Credentials were sent to the device. Waiting for it to connect to WiFi and MQTT. This may take up to 60 seconds.",
+        "submit_label": "Retry with different credentials"
       }
     },
     "error": {
       "mqtt_not_available": "MQTT integration is not configured. Please set up MQTT first.",
       "invalid_prefix": "Invalid MQTT prefix. Must not contain /, #, or + characters.",
-      "unknown": "An unexpected error occurred."
+      "unknown": "An unexpected error occurred.",
+      "ssid_required": "WiFi network name is required.",
+      "broker_required": "MQTT broker address is required.",
+      "ble_write_failed": "Failed to send credentials to the device via Bluetooth. Make sure the device is nearby and try again.",
+      "http_provision_failed": "Failed to send MQTT credentials to the device over WiFi. Check that the device is reachable and try again.",
+      "device_not_responding": "The device did not connect to MQTT. Check your WiFi and MQTT credentials and try again."
     },
     "abort": {
-      "already_configured": "SmartVan.io is already configured with this prefix."
+      "already_configured": "This device is already configured.",
+      "device_provisioned": "Device connected successfully."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "SmartVan.io Options",
+        "data": {
+          "beta_channel": "Beta firmware channel"
+        },
+        "data_description": {
+          "beta_channel": "Enable to receive beta firmware updates. Disable for stable releases only."
+        }
+      }
     }
   }
 }

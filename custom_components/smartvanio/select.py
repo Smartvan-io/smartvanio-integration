@@ -33,7 +33,7 @@ async def async_setup_entry(
 ) -> None:
     """Set up SmartVan.io select entities from config entry."""
     store = hass.data[DOMAIN][entry.entry_id]
-    created_entities: set[str] = set()
+    created_entities: dict[str, SmartVanSelect] = {}
 
     def _create_selects_from_config(device_id: str, config: dict) -> list[SmartVanSelect]:
         selects = []
@@ -43,9 +43,19 @@ async def async_setup_entry(
             channel = entity_config.get("channel", "unknown")
             unique_id = f"{device_id}_{channel}"
             if unique_id in created_entities:
+                # Entity already exists — update options if the config now provides them
+                existing = created_entities[unique_id]
+                new_options = entity_config.get("options", [])
+                if new_options and existing.options != new_options:
+                    existing._attr_options = new_options
+                    if existing._attr_current_option and existing._attr_current_option not in new_options:
+                        existing._attr_current_option = new_options[0]
+                    existing.async_write_ha_state()
+                    _LOGGER.info("Updated options for select entity: %s", unique_id)
                 continue
-            selects.append(SmartVanSelect(hass, device_id, channel, entity_config, config))
-            created_entities.add(unique_id)
+            entity = SmartVanSelect(hass, device_id, channel, entity_config, config)
+            selects.append(entity)
+            created_entities[unique_id] = entity
             _LOGGER.info("Created select entity: %s", unique_id)
         return selects
 
@@ -89,8 +99,8 @@ class SmartVanSelect(SelectEntity):
         self._attr_current_option = self._attr_options[0] if self._attr_options else None
         self._attr_available = True
 
-        self._state_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/select/{channel}/state"
-        self._command_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/select/{channel}/set"
+        self._state_topic = f"{device_id}/select/{channel}/state"
+        self._command_topic = f"{device_id}/select/{channel}/command"
         self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
 
     @property
@@ -106,12 +116,19 @@ class SmartVanSelect(SelectEntity):
     async def async_added_to_hass(self) -> None:
         @callback
         def _state_received(msg: mqtt.ReceiveMessage) -> None:
+            raw = msg.payload
             try:
-                payload = json.loads(msg.payload)
+                payload = json.loads(raw)
+                if isinstance(payload, dict):
+                    value = payload.get("value")
+                else:
+                    value = str(raw)
             except (json.JSONDecodeError, ValueError):
-                return
-            value = payload.get("value")
-            if value in self._attr_options:
+                value = str(raw)
+            # Learn options dynamically from incoming state values
+            if value and value not in self._attr_options:
+                self._attr_options = [*self._attr_options, value]
+            if value:
                 self._attr_current_option = value
                 self.async_write_ha_state()
 
@@ -130,6 +147,6 @@ class SmartVanSelect(SelectEntity):
 
     async def async_select_option(self, option: str) -> None:
         await mqtt.async_publish(
-            self.hass, self._command_topic, json.dumps({"value": option}),
+            self.hass, self._command_topic, option,
             qos=MQTT_QOS, retain=False,
         )

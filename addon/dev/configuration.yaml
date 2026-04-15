@@ -17,6 +17,8 @@ logger:
 lovelace:
   mode: yaml
   resources:
+    - url: /local/smartvanio/kiosk-mode.js
+      type: module
     - url: /local/smartvanio/smartvanio-main-card.js
       type: module
   dashboards:

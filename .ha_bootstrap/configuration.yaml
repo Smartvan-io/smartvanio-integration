@@ -15,13 +15,19 @@ logger:
   logs:
     custom_components.smartvanio: debug
 
+# Automations
+automation: !include automations.yaml
+
+# Scenes
+scene: !include scenes.yaml
+
 # Lovelace dashboards
 lovelace:
   mode: yaml
   resources:
     - url: /local/kiosk-mode.js
       type: module
-    - url: /local/smartvanio-main-card.js
+    - url: /local/smartvanio-main-card.js?v=140
       type: module
   dashboards:
     smartvan-io:

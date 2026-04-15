@@ -156,6 +156,8 @@ if [ -f "$CONFIG_FILE" ]; then
 lovelace:
   mode: yaml
   resources:
+    - url: /local/smartvanio/kiosk-mode.js
+      type: module
     - url: /local/smartvanio/smartvanio-main-card.js
       type: module
   dashboards:
@@ -198,6 +200,13 @@ if [ "$MODE" = "supervisor" ]; then
     if wait_for_ha; then
         # Register Lovelace resources via API (in case storage mode is used)
         EXISTING=$(ha_api GET "/config/lovelace/resources" 2>/dev/null || echo "[]")
+
+        KIOSK_EXISTS=$(echo "$EXISTING" | jq -r '[.[] | select(.url | contains("kiosk-mode"))] | length' 2>/dev/null || echo "0")
+        if [ "$KIOSK_EXISTS" = "0" ]; then
+            ha_api POST "/config/lovelace/resources" \
+                '{"res_type":"module","url":"/local/smartvanio/kiosk-mode.js"}' >/dev/null 2>&1 || true
+            log_info "  Registered kiosk-mode.js resource"
+        fi
 
         MAIN_CARD_EXISTS=$(echo "$EXISTING" | jq -r '[.[] | select(.url | contains("smartvanio-main-card"))] | length' 2>/dev/null || echo "0")
         if [ "$MAIN_CARD_EXISTS" = "0" ]; then

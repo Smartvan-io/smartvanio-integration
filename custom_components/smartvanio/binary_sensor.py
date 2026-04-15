@@ -99,9 +99,7 @@ class SmartVanBinarySensor(BinarySensorEntity):
         raw_class = entity_config.get("device_class", "None")
         self._attr_device_class = _DEVICE_CLASS_MAP.get(raw_class)
 
-        self._state_topic = (
-            f"{MQTT_TOPIC_PREFIX}/{device_id}/binary_sensor/{channel}/state"
-        )
+        self._state_topic = f"{device_id}/binary_sensor/{channel}/state"
         self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
 
     @property
@@ -117,11 +115,15 @@ class SmartVanBinarySensor(BinarySensorEntity):
     async def async_added_to_hass(self) -> None:
         @callback
         def _state_received(msg: mqtt.ReceiveMessage) -> None:
+            raw = msg.payload
             try:
-                payload = json.loads(msg.payload)
+                payload = json.loads(raw)
+                if isinstance(payload, dict):
+                    self._attr_is_on = payload.get("state", "OFF").upper() == "ON"
+                else:
+                    self._attr_is_on = str(raw).upper() == "ON"
             except (json.JSONDecodeError, ValueError):
-                return
-            self._attr_is_on = payload.get("state", "OFF").upper() == "ON"
+                self._attr_is_on = str(raw).upper() == "ON"
             self.async_write_ha_state()
 
         await mqtt.async_subscribe(self.hass, self._state_topic, _state_received, qos=MQTT_QOS)

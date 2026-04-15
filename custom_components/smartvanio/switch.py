@@ -84,8 +84,8 @@ class SmartVanSwitch(SwitchEntity):
         self._attr_is_on = False
         self._attr_available = True
 
-        self._state_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/switch/{channel}/state"
-        self._command_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/switch/{channel}/set"
+        self._state_topic = f"{device_id}/switch/{channel}/state"
+        self._command_topic = f"{device_id}/switch/{channel}/command"
         self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
 
     @property
@@ -101,11 +101,15 @@ class SmartVanSwitch(SwitchEntity):
     async def async_added_to_hass(self) -> None:
         @callback
         def _state_received(msg: mqtt.ReceiveMessage) -> None:
+            raw = msg.payload
             try:
-                payload = json.loads(msg.payload)
+                payload = json.loads(raw)
+                if isinstance(payload, dict):
+                    self._attr_is_on = payload.get("state", "OFF").upper() == "ON"
+                else:
+                    self._attr_is_on = str(raw).upper() == "ON"
             except (json.JSONDecodeError, ValueError):
-                return
-            self._attr_is_on = payload.get("state", "OFF").upper() == "ON"
+                self._attr_is_on = str(raw).upper() == "ON"
             self.async_write_ha_state()
 
         await mqtt.async_subscribe(self.hass, self._state_topic, _state_received, qos=MQTT_QOS)
@@ -123,12 +127,12 @@ class SmartVanSwitch(SwitchEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         await mqtt.async_publish(
-            self.hass, self._command_topic, json.dumps({"state": "ON"}),
+            self.hass, self._command_topic, "ON",
             qos=MQTT_QOS, retain=False,
         )
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await mqtt.async_publish(
-            self.hass, self._command_topic, json.dumps({"state": "OFF"}),
+            self.hass, self._command_topic, "OFF",
             qos=MQTT_QOS, retain=False,
         )

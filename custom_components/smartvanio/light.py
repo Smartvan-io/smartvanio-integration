@@ -9,9 +9,11 @@ from typing import Any
 from homeassistant.components import mqtt
 from homeassistant.components.light import (
     ATTR_BRIGHTNESS,
+    ATTR_EFFECT,
     ATTR_RGB_COLOR,
     ColorMode,
     LightEntity,
+    LightEntityFeature,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
@@ -39,6 +41,7 @@ async def async_setup_entry(
     """Set up SmartVan.io lights from config entry."""
     store = hass.data[DOMAIN][entry.entry_id]
     created_entities: set[str] = set()
+    segment_entity_refs: dict[str, "SmartVanSegmentLight"] = {}
 
     def _create_lights_from_config(device_id: str, config: dict) -> list[SmartVanLight]:
         lights = []
@@ -133,6 +136,7 @@ async def async_setup_entry(
                 _LOGGER.info("Removing stale segment entity: %s", entry.unique_id)
                 entity_reg.async_remove(entry.entity_id)
                 created_entities.discard(entry.unique_id)
+                segment_entity_refs.pop(entry.unique_id, None)
 
         # Create entities not yet instantiated this session.
         # created_entities is per-session (reset on HA restart), so entities are
@@ -144,20 +148,38 @@ async def async_setup_entry(
                 continue
             unique_id = f"{uid_prefix}{seg_id}"
             if unique_id in created_entities:
+                # Update existing entity attributes (start/end/name may have changed)
+                entity_obj = segment_entity_refs.get(unique_id)
+                if entity_obj:
+                    entity_obj._start = int(seg.get("start", 0))
+                    entity_obj._end = int(seg.get("end", 0))
+                    entity_obj._attr_name = seg.get("name", f"Segment {seg_id}")
+                    if "r" in seg and "g" in seg and "b" in seg:
+                        entity_obj._attr_rgb_color = (
+                            int(seg.get("r", 255)),
+                            int(seg.get("g", 255)),
+                            int(seg.get("b", 255)),
+                        )
+                    if "brightness" in seg:
+                        entity_obj._attr_brightness = max(1, min(255, int(round(int(seg["brightness"]) * 2.55))))
+                    entity_obj.async_write_ha_state()
+                    _LOGGER.info("Updated segment entity: %s (start=%s, end=%s)", unique_id, entity_obj._start, entity_obj._end)
                 continue
-            new_entities.append(
-                SmartVanSegmentLight(
-                    hass=hass,
-                    device_id=device_id,
-                    channel=channel,
-                    segment_id=seg_id,
-                    name=seg.get("name", f"Segment {seg_id}"),
-                    start=int(seg.get("start", 0)),
-                    end=int(seg.get("end", 0)),
-                    parent_entity_id=parent_entity_id,
-                    device_config=device_config,
-                )
+            seg_entity = SmartVanSegmentLight(
+                hass=hass,
+                device_id=device_id,
+                channel=channel,
+                segment_id=seg_id,
+                name=seg.get("name", f"Segment {seg_id}"),
+                start=int(seg.get("start", 0)),
+                end=int(seg.get("end", 0)),
+                parent_entity_id=parent_entity_id,
+                device_config=device_config,
+                rgb=(int(seg.get("r", 255)), int(seg.get("g", 255)), int(seg.get("b", 255))),
+                brightness=max(1, min(255, int(round(int(seg.get("brightness", 100)) * 2.55)))),
             )
+            new_entities.append(seg_entity)
+            segment_entity_refs[unique_id] = seg_entity
             created_entities.add(unique_id)
             _LOGGER.info("Created segment light entity: %s (parent=%s)", unique_id, parent_entity_id)
 
@@ -172,7 +194,7 @@ async def async_setup_entry(
     )
 
 
-class SmartVanLight(LightEntity):
+class SmartVanLight(LightEntity, RestoreEntity):
     """A SmartVan.io light controlled via MQTT."""
 
     _attr_has_entity_name = True
@@ -213,12 +235,20 @@ class SmartVanLight(LightEntity):
         self._attr_available = True
         self._max_leds: int = int(entity_config.get("max_leds", 0))
 
+        # Pattern/effect support
+        self._attr_supported_features = LightEntityFeature.EFFECT
+        self._attr_effect_list: list[str] = []
+        self._attr_effect: str | None = None
+        self._patterns: dict[str, list] = {}
+
         # ESPHome publishes light state/commands on native topics (device_id as prefix)
         self._state_topic = f"{device_id}/light/{channel}/state"
         self._command_topic = f"{device_id}/light/{channel}/command"
+        self._pattern_set_topic = f"{device_id}/light/{channel}/pattern_set"
         # Discovery and status still use the smartvanio/ prefix
         self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
         self._segments_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/light/{channel}/segments"
+        self._patterns_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/light/{channel}/patterns"
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -235,9 +265,34 @@ class SmartVanLight(LightEntity):
         attrs: dict[str, Any] = {"last_brightness": self._attr_brightness}
         if self._max_leds:
             attrs["max_leds"] = self._max_leds
+        # Persist active effect name even when light is off (HA's built-in
+        # effect attribute is cleared to None when off, losing the pattern).
+        if self._attr_effect:
+            attrs["smartvanio_effect"] = self._attr_effect
         return attrs
 
     async def async_added_to_hass(self) -> None:
+        # Restore last known state (including active effect/pattern)
+        last_state = await self.async_get_last_state()
+        if last_state:
+            self._attr_is_on = last_state.state == "on"
+            if (brightness := last_state.attributes.get(ATTR_BRIGHTNESS)) is not None:
+                self._attr_brightness = int(brightness)
+            if (rgb := last_state.attributes.get(ATTR_RGB_COLOR)) is not None:
+                self._attr_rgb_color = tuple(int(c) for c in rgb)
+            # Restore active effect — prefer our custom attribute (persists
+            # even when light is off), fall back to HA's built-in effect attr.
+            effect = (
+                last_state.attributes.get("smartvanio_effect")
+                or last_state.attributes.get(ATTR_EFFECT)
+            )
+            if effect:
+                self._attr_effect = effect
+                # Seed effect_list so HA exposes the effect attribute in state
+                # immediately, before the retained MQTT patterns message arrives.
+                self._attr_effect_list = [effect]
+                _LOGGER.debug("Restored effect '%s' for %s", effect, self.entity_id)
+
         @callback
         def _state_received(msg: mqtt.ReceiveMessage) -> None:
             try:
@@ -284,6 +339,20 @@ class SmartVanLight(LightEntity):
 
         await mqtt.async_subscribe(self.hass, self._segments_topic, _segments_received, qos=MQTT_QOS)
 
+        @callback
+        def _patterns_received(msg: mqtt.ReceiveMessage) -> None:
+            try:
+                data = json.loads(msg.payload)
+            except (json.JSONDecodeError, ValueError):
+                return
+            if not isinstance(data, dict):
+                return
+            self._patterns = data
+            self._attr_effect_list = list(data.keys())
+            self.async_write_ha_state()
+
+        await mqtt.async_subscribe(self.hass, self._patterns_topic, _patterns_received, qos=MQTT_QOS)
+
         # Reflect aggregate segment state on the parent switch
         @callback
         def _on_segment_state_changed(event) -> None:
@@ -308,11 +377,13 @@ class SmartVanLight(LightEntity):
         if "state" in payload:
             self._attr_is_on = payload["state"].upper() == "ON"
         if "brightness" in payload:
-            brightness = max(0, min(255, int(payload["brightness"])))
-            # Only update if non-zero: devices commonly report brightness=0 in the
-            # OFF state, which would reset last_brightness and move the slider to 0.
-            if brightness > 0:
-                self._attr_brightness = brightness
+            # When child segments exist, brightness is managed per-segment.
+            # The firmware forces the parent strip to 100% when activating
+            # the Segments effect, so ignore firmware brightness reports.
+            if not self._child_segment_ids():
+                brightness = max(0, min(255, int(payload["brightness"])))
+                if brightness > 0:
+                    self._attr_brightness = brightness
         if "color" in payload and self._attr_is_on:
             # Only update colour when the light is on. Devices typically report
             # their default colour (e.g. white) in the OFF state payload, which
@@ -323,19 +394,81 @@ class SmartVanLight(LightEntity):
                 max(0, min(255, int(color.get("g", 255)))),
                 max(0, min(255, int(color.get("b", 255)))),
             )
+        # Note: we intentionally ignore the "effect" field from firmware state
+        # messages. The firmware only knows about its built-in effects (e.g.
+        # "Rainbow"), not our custom MQTT patterns. It always reports
+        # "effect":"None" which would wipe out the active pattern. Instead,
+        # _attr_effect is managed exclusively by async_turn_on / _applyPattern.
 
-    async def async_turn_on(self, **kwargs: Any) -> None:
-        # Turn on all child segment entities first
-        my_entity_id = self.entity_id
-        segment_ids = [
+    def _child_segment_ids(self) -> list[str]:
+        """Return entity_ids of child segment lights."""
+        return [
             s.entity_id
             for s in self.hass.states.async_all("light")
-            if s.attributes.get("smartvanio_parent_entity_id") == my_entity_id
+            if s.attributes.get("smartvanio_parent_entity_id") == self.entity_id
         ]
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        # Pattern effect activation — bypasses segment forwarding
+        effect_name = kwargs.get(ATTR_EFFECT) or (
+            # Re-apply last effect on plain turn_on (off→on persistence)
+            self._attr_effect if not kwargs or set(kwargs.keys()) <= {ATTR_BRIGHTNESS} else None
+        )
+        if effect_name and effect_name != "None":
+            # Brightness-only adjustment while pattern is active — forward to
+            # firmware as a normal brightness command, keep pattern running.
+            if ATTR_EFFECT not in kwargs and ATTR_BRIGHTNESS in kwargs:
+                payload: dict[str, Any] = {
+                    "state": "ON",
+                    "brightness": kwargs[ATTR_BRIGHTNESS],
+                }
+                await mqtt.async_publish(
+                    self.hass, self._command_topic,
+                    json.dumps(payload),
+                    qos=MQTT_QOS, retain=False,
+                )
+                self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
+                self._attr_is_on = True
+                self.async_write_ha_state()
+                return
+
+            stops = self._patterns.get(effect_name)
+            if stops:
+                await mqtt.async_publish(
+                    self.hass, self._pattern_set_topic,
+                    json.dumps({"stops": stops}),
+                    qos=MQTT_QOS, retain=False,
+                )
+            # Always record the active effect (card may have already sent
+            # the MQTT pattern directly, so stops lookup can be empty).
+            self._attr_effect = effect_name
+            self._attr_is_on = True
+            if ATTR_BRIGHTNESS in kwargs:
+                self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
+            self.async_write_ha_state()
+            return
+
+        # Clear active effect on explicit color commands (not brightness-only)
+        if ATTR_RGB_COLOR in kwargs or ATTR_EFFECT in kwargs:
+            self._attr_effect = None
+
+        segment_ids = self._child_segment_ids()
         if segment_ids:
+            # Parent acts as master switch — forward to segments, skip whole-strip
+            svc_data: dict[str, Any] = {"entity_id": segment_ids}
+            if ATTR_BRIGHTNESS in kwargs:
+                svc_data["brightness"] = kwargs[ATTR_BRIGHTNESS]
+                self._attr_brightness = kwargs[ATTR_BRIGHTNESS]
+            if ATTR_RGB_COLOR in kwargs:
+                svc_data["rgb_color"] = kwargs[ATTR_RGB_COLOR]
+                self._attr_rgb_color = kwargs[ATTR_RGB_COLOR]
             await self.hass.services.async_call(
-                "light", "turn_on", {"entity_id": segment_ids}, blocking=True
+                "light", "turn_on", svc_data, blocking=True
             )
+            self._attr_is_on = True
+            self.async_write_ha_state()
+            return
+
         payload: dict[str, Any] = {"state": "ON"}
         if ATTR_BRIGHTNESS in kwargs:
             payload["brightness"] = kwargs[ATTR_BRIGHTNESS]
@@ -344,22 +477,29 @@ class SmartVanLight(LightEntity):
             r, g, b = kwargs[ATTR_RGB_COLOR]
             payload["color"] = {"r": r, "g": g, "b": b}
             self._attr_rgb_color = (r, g, b)
+        # Smooth transition for brightness/color changes
+        if "transition" in kwargs:
+            payload["transition"] = kwargs["transition"]
+        elif ATTR_BRIGHTNESS in kwargs and ATTR_RGB_COLOR not in kwargs:
+            payload["transition"] = 1
+        # Tell firmware to clear any active effect (Pattern/Segments)
+        if ATTR_RGB_COLOR in kwargs or ATTR_EFFECT in kwargs:
+            payload["effect"] = "None"
         self._attr_is_on = True
         self.async_write_ha_state()
         await self._publish_command(payload)
 
     async def async_turn_off(self, **kwargs: Any) -> None:
-        # Turn off all child segment entities first
-        my_entity_id = self.entity_id
-        segment_ids = [
-            s.entity_id
-            for s in self.hass.states.async_all("light")
-            if s.attributes.get("smartvanio_parent_entity_id") == my_entity_id
-        ]
+        segment_ids = self._child_segment_ids()
         if segment_ids:
+            # Parent acts as master switch — forward to segments, skip whole-strip
             await self.hass.services.async_call(
                 "light", "turn_off", {"entity_id": segment_ids}, blocking=True
             )
+            self._attr_is_on = False
+            self.async_write_ha_state()
+            return
+
         self._attr_is_on = False
         self.async_write_ha_state()
         await self._publish_command({"state": "OFF"})
@@ -391,6 +531,8 @@ class SmartVanSegmentLight(LightEntity, RestoreEntity):
         end: int,
         parent_entity_id: str,
         device_config: dict[str, Any],
+        rgb: tuple[int, int, int] = (255, 255, 255),
+        brightness: int = 255,
     ) -> None:
         self.hass = hass
         self._device_id = device_id
@@ -404,11 +546,11 @@ class SmartVanSegmentLight(LightEntity, RestoreEntity):
         self._attr_unique_id = f"{device_id}_{channel}_seg_{segment_id}"
         self._attr_name = name
         self._attr_is_on = False
-        self._attr_brightness = 255
-        self._attr_rgb_color = (255, 255, 255)
+        self._attr_brightness = brightness
+        self._attr_rgb_color = rgb
         self._attr_available = True
 
-        self._command_topic = f"{device_id}/light/{channel}/command"
+        self._command_topic = f"{device_id}/light/{channel}/segment_set"
         self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
 
     @property
@@ -428,6 +570,7 @@ class SmartVanSegmentLight(LightEntity, RestoreEntity):
             "segment_start": self._start,
             "segment_end": self._end,
             "segment_id": self._segment_id,
+            "rgb_color": list(self._attr_rgb_color),
         }
 
     async def async_added_to_hass(self) -> None:

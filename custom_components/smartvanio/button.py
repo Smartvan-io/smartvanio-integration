@@ -88,7 +88,7 @@ class SmartVanButton(ButtonEntity):
         self._attr_icon = entity_config.get("icon")
         self._attr_available = True
 
-        self._command_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/button/{channel}/press"
+        self._command_topic = f"{device_id}/button/{channel}/command"
         self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
 
     @property
@@ -115,6 +115,6 @@ class SmartVanButton(ButtonEntity):
 
     async def async_press(self) -> None:
         await mqtt.async_publish(
-            self.hass, self._command_topic, json.dumps({}),
+            self.hass, self._command_topic, "PRESS",
             qos=MQTT_QOS, retain=False,
         )
