@@ -248,12 +248,20 @@ if [ "$MODE" = "supervisor" ]; then
             FLOW=$(ha_api POST "/config/config_entries/flow" \
                 '{"handler":"mqtt","show_advanced_options":false}' 2>/dev/null || echo "")
             FLOW_ID=$(echo "$FLOW" | jq -r '.flow_id // empty' 2>/dev/null)
+            FLOW_TYPE=$(echo "$FLOW" | jq -r '.type // empty' 2>/dev/null)
             if [ -n "$FLOW_ID" ]; then
-                RESULT=$(ha_api POST "/config/config_entries/flow/${FLOW_ID}" \
-                    "{\"broker\":\"${MQTT_HOST}\",\"port\":1883,\"username\":\"${MQTT_USER}\",\"password\":\"${MQTT_PASSWORD}\"}" 2>/dev/null)
+                if [ "$FLOW_TYPE" = "menu" ]; then
+                    # Mosquitto is installed — select the addon option for auto-config
+                    RESULT=$(ha_api POST "/config/config_entries/flow/${FLOW_ID}" \
+                        '{"next_step_id":"addon"}' 2>/dev/null)
+                else
+                    # No Mosquitto — configure broker manually
+                    RESULT=$(ha_api POST "/config/config_entries/flow/${FLOW_ID}" \
+                        "{\"broker\":\"${MQTT_HOST}\",\"port\":1883,\"username\":\"${MQTT_USER}\",\"password\":\"${MQTT_PASSWORD}\"}" 2>/dev/null)
+                fi
                 RESULT_TYPE=$(echo "$RESULT" | jq -r '.type // empty' 2>/dev/null)
                 if [ "$RESULT_TYPE" = "create_entry" ]; then
-                    bashio::log.info "  MQTT configured (broker: ${MQTT_HOST})"
+                    bashio::log.info "  MQTT configured"
                 else
                     bashio::log.warning "  MQTT config flow: ${RESULT_TYPE} — configure manually"
                 fi
