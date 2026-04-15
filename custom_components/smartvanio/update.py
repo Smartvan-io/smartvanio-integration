@@ -75,6 +75,19 @@ def _build_github_md5_url(firmware_type: str, branch: str) -> str:
     )
 
 
+CARD_GITHUB_REPO = "smartvanio-main-card"
+CARD_INSTALL_DIR = "/config/www/smartvanio"
+CARD_VERSION_FILE = "/config/www/smartvanio/.card_version"
+
+
+def _build_card_url(filename: str, branch: str) -> str:
+    return (
+        f"https://raw.githubusercontent.com/"
+        f"{FIRMWARE_GITHUB_ORG}/{CARD_GITHUB_REPO}/"
+        f"refs/heads/{branch}/{filename}"
+    )
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: ConfigEntry,
@@ -83,6 +96,10 @@ async def async_setup_entry(
     """Set up SmartVan.io update entities from config entry."""
     store = hass.data[DOMAIN][entry.entry_id]
     created_entities: dict[str, SmartVanUpdate] = {}
+
+    # Always create the card update entity
+    card_entity = SmartVanCardUpdate(hass, entry)
+    async_add_entities([card_entity])
 
     def _create_update_from_config(
         device_id: str, config: dict
@@ -362,3 +379,137 @@ class SmartVanUpdate(UpdateEntity):
                 self.async_write_ha_state()
 
         self.hass.async_create_task(_timeout_guard())
+
+
+class SmartVanCardUpdate(UpdateEntity):
+    """Update entity for the SmartVan.io dashboard card."""
+
+    _attr_has_entity_name = True
+    _attr_supported_features = (
+        UpdateEntityFeature.INSTALL
+        | UpdateEntityFeature.RELEASE_NOTES
+    )
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self.hass = hass
+        self._entry = entry
+        self._attr_unique_id = "smartvanio_card"
+        self._attr_name = "Dashboard Card"
+        self._attr_installed_version = self._read_installed_version()
+        self._attr_latest_version = None
+        self._attr_in_progress: bool | int = False
+        self._release_notes: str | None = None
+        self._attr_entity_picture = "https://smartvan.io/icon.png"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, "smartvanio_hub")},
+            name="SmartVan.io",
+            manufacturer=MANUFACTURER,
+            model="Dashboard",
+        )
+
+    @property
+    def _branch(self) -> str:
+        beta = self._entry.data.get(CONF_BETA_CHANNEL, DEFAULT_BETA_CHANNEL)
+        return "beta" if beta else "main"
+
+    @staticmethod
+    def _read_installed_version() -> str | None:
+        try:
+            with open(CARD_VERSION_FILE) as f:
+                return f.read().strip() or None
+        except FileNotFoundError:
+            return None
+
+    @staticmethod
+    def _write_installed_version(version: str) -> None:
+        os.makedirs(CARD_INSTALL_DIR, exist_ok=True)
+        with open(CARD_VERSION_FILE, "w") as f:
+            f.write(version)
+
+    async def async_added_to_hass(self) -> None:
+        await self._fetch_manifest()
+
+    async def async_update(self) -> None:
+        await self._fetch_manifest()
+
+    async def _fetch_manifest(self) -> None:
+        url = _build_card_url("package.json", self._branch)
+        session = async_get_clientsession(self.hass)
+        try:
+            async with session.get(url, timeout=15) as resp:
+                if resp.status != 200:
+                    return
+                data = await resp.json(content_type=None)
+        except Exception:
+            _LOGGER.debug("Failed to fetch card manifest")
+            return
+
+        latest = data.get("version")
+        if latest:
+            self._attr_latest_version = latest
+
+    def release_notes(self) -> str | None:
+        parts = []
+        if self._release_notes:
+            parts.append(self._release_notes)
+        parts.append(f"Channel: **{self._branch}**")
+        parts.append("Updates the SmartVan.io dashboard card and kiosk mode.")
+        return "\n\n".join(parts)
+
+    async def async_install(
+        self, version: str | None, backup: bool, **kwargs: Any
+    ) -> None:
+        """Download latest card files from GitHub."""
+        self._attr_in_progress = True
+        self.async_write_ha_state()
+
+        try:
+            session = async_get_clientsession(self.hass)
+            branch = self._branch
+
+            os.makedirs(CARD_INSTALL_DIR, exist_ok=True)
+
+            # Download main card
+            card_url = _build_card_url("index.js", branch)
+            card_path = os.path.join(CARD_INSTALL_DIR, "smartvanio-main-card.js")
+            async with session.get(card_url, timeout=60) as resp:
+                if resp.status != 200:
+                    raise Exception(f"Failed to download card: HTTP {resp.status}")
+                data = await resp.read()
+                await self.hass.async_add_executor_job(
+                    self._write_file, card_path, data
+                )
+                _LOGGER.info("Downloaded smartvanio-main-card.js: %d bytes", len(data))
+
+            # Download kiosk mode
+            kiosk_url = _build_card_url("kiosk-mode.js", branch)
+            kiosk_path = os.path.join(CARD_INSTALL_DIR, "kiosk-mode.js")
+            async with session.get(kiosk_url, timeout=30) as resp:
+                if resp.status == 200:
+                    data = await resp.read()
+                    await self.hass.async_add_executor_job(
+                        self._write_file, kiosk_path, data
+                    )
+                    _LOGGER.info("Downloaded kiosk-mode.js: %d bytes", len(data))
+
+            # Update installed version
+            new_version = version or self._attr_latest_version
+            if new_version:
+                await self.hass.async_add_executor_job(
+                    self._write_installed_version, new_version
+                )
+                self._attr_installed_version = new_version
+
+        except Exception as err:
+            _LOGGER.error("Card update failed: %s", err)
+        finally:
+            self._attr_in_progress = False
+            self.async_write_ha_state()
+
+    @staticmethod
+    def _write_file(path: str, data: bytes) -> None:
+        with open(path, "wb") as f:
+            f.write(data)
