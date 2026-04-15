@@ -1,8 +1,9 @@
 """SmartVan.io Update platform.
 
-Exposes firmware update entities for SmartVan.io devices. Checks a GitHub-hosted
-manifest per device type to determine if a newer firmware is available, and
-triggers OTA flashing via MQTT when the user installs.
+Exposes update entities for:
+  - Device firmware (OTA via MQTT)
+  - Dashboard card (downloaded from GitHub)
+  - Integration itself (cloned from GitHub)
 
 OTA flow:
   1. HA downloads firmware.bin + hash.txt from GitHub
@@ -21,6 +22,9 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
 from typing import Any
 
 from homeassistant.components import mqtt
@@ -79,6 +83,10 @@ CARD_GITHUB_REPO = "smartvanio-main-card"
 CARD_INSTALL_DIR = "/config/www/smartvanio"
 CARD_VERSION_FILE = "/config/www/smartvanio/.card_version"
 
+INTEGRATION_GITHUB_REPO = "smartvanio-integration"
+INTEGRATION_INSTALL_DIR = "/config/custom_components/smartvanio"
+INTEGRATION_MANIFEST = "/config/custom_components/smartvanio/manifest.json"
+
 
 def _build_card_url(filename: str, branch: str) -> str:
     return (
@@ -97,9 +105,10 @@ async def async_setup_entry(
     store = hass.data[DOMAIN][entry.entry_id]
     created_entities: dict[str, SmartVanUpdate] = {}
 
-    # Always create the card update entity
+    # Always create the card and integration update entities
     card_entity = SmartVanCardUpdate(hass, entry)
-    async_add_entities([card_entity])
+    integration_entity = SmartVanIntegrationUpdate(hass, entry)
+    async_add_entities([card_entity, integration_entity])
 
     def _create_update_from_config(
         device_id: str, config: dict
@@ -513,3 +522,134 @@ class SmartVanCardUpdate(UpdateEntity):
     def _write_file(path: str, data: bytes) -> None:
         with open(path, "wb") as f:
             f.write(data)
+
+
+class SmartVanIntegrationUpdate(UpdateEntity):
+    """Update entity for the SmartVan.io integration."""
+
+    _attr_has_entity_name = True
+    _attr_supported_features = (
+        UpdateEntityFeature.INSTALL
+        | UpdateEntityFeature.RELEASE_NOTES
+    )
+
+    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+        self.hass = hass
+        self._entry = entry
+        self._attr_unique_id = "smartvanio_integration"
+        self._attr_name = "Integration"
+        self._attr_installed_version = self._read_installed_version()
+        self._attr_latest_version = None
+        self._attr_in_progress: bool | int = False
+        self._release_notes: str | None = None
+        self._attr_entity_picture = "https://smartvan.io/icon.png"
+
+    @property
+    def device_info(self) -> DeviceInfo:
+        return DeviceInfo(
+            identifiers={(DOMAIN, "smartvanio_hub")},
+            name="SmartVan.io",
+            manufacturer=MANUFACTURER,
+            model="Dashboard",
+        )
+
+    @property
+    def _branch(self) -> str:
+        beta = self._entry.data.get(CONF_BETA_CHANNEL, DEFAULT_BETA_CHANNEL)
+        return "beta" if beta else "main"
+
+    @staticmethod
+    def _read_installed_version() -> str | None:
+        try:
+            with open(INTEGRATION_MANIFEST) as f:
+                data = json.load(f)
+                return data.get("version")
+        except (FileNotFoundError, json.JSONDecodeError):
+            return None
+
+    async def async_added_to_hass(self) -> None:
+        await self._fetch_manifest()
+
+    async def async_update(self) -> None:
+        await self._fetch_manifest()
+
+    async def _fetch_manifest(self) -> None:
+        url = (
+            f"https://raw.githubusercontent.com/"
+            f"{FIRMWARE_GITHUB_ORG}/{INTEGRATION_GITHUB_REPO}/"
+            f"refs/heads/{self._branch}/custom_components/smartvanio/manifest.json"
+        )
+        session = async_get_clientsession(self.hass)
+        try:
+            async with session.get(url, timeout=15) as resp:
+                if resp.status != 200:
+                    return
+                data = await resp.json(content_type=None)
+        except Exception:
+            _LOGGER.debug("Failed to fetch integration manifest")
+            return
+
+        latest = data.get("version")
+        if latest:
+            self._attr_latest_version = latest
+        self._release_notes = data.get("release_notes")
+
+    def release_notes(self) -> str | None:
+        parts = []
+        if self._release_notes:
+            parts.append(self._release_notes)
+        parts.append(f"Channel: **{self._branch}**")
+        parts.append("Updates the SmartVan.io integration. Restart HA after installing.")
+        return "\n\n".join(parts)
+
+    async def async_install(
+        self, version: str | None, backup: bool, **kwargs: Any
+    ) -> None:
+        """Clone latest integration from GitHub and replace installed files."""
+        self._attr_in_progress = True
+        self.async_write_ha_state()
+
+        try:
+            branch = self._branch
+            repo_url = (
+                f"https://github.com/{FIRMWARE_GITHUB_ORG}/"
+                f"{INTEGRATION_GITHUB_REPO}.git"
+            )
+
+            await self.hass.async_add_executor_job(
+                self._clone_and_install, repo_url, branch
+            )
+
+            new_version = self._read_installed_version()
+            if new_version:
+                self._attr_installed_version = new_version
+
+            _LOGGER.info(
+                "Integration updated to %s — restart HA to apply",
+                new_version,
+            )
+
+        except Exception as err:
+            _LOGGER.error("Integration update failed: %s", err)
+        finally:
+            self._attr_in_progress = False
+            self.async_write_ha_state()
+
+    @staticmethod
+    def _clone_and_install(repo_url: str, branch: str) -> None:
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            subprocess.run(
+                ["git", "clone", "--depth", "1", "--branch", branch, repo_url, tmp_dir],
+                check=True,
+                capture_output=True,
+            )
+            src = os.path.join(tmp_dir, "custom_components", "smartvanio")
+            if not os.path.isdir(src):
+                raise Exception("Integration not found in cloned repo")
+
+            if os.path.isdir(INTEGRATION_INSTALL_DIR):
+                shutil.rmtree(INTEGRATION_INSTALL_DIR)
+            shutil.copytree(src, INTEGRATION_INSTALL_DIR)
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
