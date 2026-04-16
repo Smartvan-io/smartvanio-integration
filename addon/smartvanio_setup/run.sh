@@ -245,25 +245,101 @@ if [ "$MODE" = "supervisor" ]; then
         MQTT_EXISTS=$(echo "$ENTRIES" | jq -r '[.[] | select(.domain == "mqtt")] | length' 2>/dev/null || echo "0")
 
         if [ "$MQTT_EXISTS" = "0" ]; then
+            # Try the config flow API first
             FLOW=$(ha_api POST "/config/config_entries/flow" \
                 '{"handler":"mqtt","show_advanced_options":false}' 2>/dev/null || echo "")
             FLOW_ID=$(echo "$FLOW" | jq -r '.flow_id // empty' 2>/dev/null)
             FLOW_TYPE=$(echo "$FLOW" | jq -r '.type // empty' 2>/dev/null)
+            FLOW_STEP=$(echo "$FLOW" | jq -r '.step_id // empty' 2>/dev/null)
+            bashio::log.info "  MQTT flow: type=${FLOW_TYPE} step=${FLOW_STEP}"
+
+            MQTT_DONE=false
+
             if [ -n "$FLOW_ID" ]; then
                 if [ "$FLOW_TYPE" = "menu" ]; then
-                    # Mosquitto is installed — select the addon option for auto-config
+                    # Mosquitto addon detected — select it
                     RESULT=$(ha_api POST "/config/config_entries/flow/${FLOW_ID}" \
                         '{"next_step_id":"addon"}' 2>/dev/null)
-                else
-                    # No Mosquitto — configure broker manually
+                    RESULT_TYPE=$(echo "$RESULT" | jq -r '.type // empty' 2>/dev/null)
+                    bashio::log.info "  MQTT addon select: type=${RESULT_TYPE}"
+
+                    # Walk through any remaining form steps
+                    while [ "$RESULT_TYPE" = "form" ]; do
+                        FID=$(echo "$RESULT" | jq -r '.flow_id // empty' 2>/dev/null)
+                        RESULT=$(ha_api POST "/config/config_entries/flow/${FID}" '{}' 2>/dev/null)
+                        RESULT_TYPE=$(echo "$RESULT" | jq -r '.type // empty' 2>/dev/null)
+                        bashio::log.info "  MQTT flow continue: type=${RESULT_TYPE}"
+                    done
+
+                    if [ "$RESULT_TYPE" = "create_entry" ] || [ "$RESULT_TYPE" = "abort" ]; then
+                        # Check if entry now exists (abort can mean it was auto-created)
+                        ENTRIES2=$(ha_api GET "/config/config_entries/entry" 2>/dev/null || echo "[]")
+                        MQTT_NOW=$(echo "$ENTRIES2" | jq -r '[.[] | select(.domain == "mqtt")] | length' 2>/dev/null || echo "0")
+                        if [ "$MQTT_NOW" != "0" ]; then
+                            bashio::log.info "  MQTT configured via Mosquitto addon"
+                            MQTT_DONE=true
+                        fi
+                    fi
+                elif [ "$FLOW_TYPE" = "form" ] && [ "$FLOW_STEP" = "broker" ]; then
+                    # Direct broker form — fill it in manually
                     RESULT=$(ha_api POST "/config/config_entries/flow/${FLOW_ID}" \
                         "{\"broker\":\"${MQTT_HOST}\",\"port\":1883,\"username\":\"${MQTT_USER}\",\"password\":\"${MQTT_PASSWORD}\"}" 2>/dev/null)
+                    RESULT_TYPE=$(echo "$RESULT" | jq -r '.type // empty' 2>/dev/null)
+                    if [ "$RESULT_TYPE" = "create_entry" ]; then
+                        bashio::log.info "  MQTT configured via broker form"
+                        MQTT_DONE=true
+                    fi
                 fi
-                RESULT_TYPE=$(echo "$RESULT" | jq -r '.type // empty' 2>/dev/null)
-                if [ "$RESULT_TYPE" = "create_entry" ]; then
-                    bashio::log.info "  MQTT configured"
-                else
-                    bashio::log.warning "  MQTT config flow: ${RESULT_TYPE} — configure manually"
+            fi
+
+            # Fallback: use hassio discovery to trigger MQTT auto-config
+            if [ "$MQTT_DONE" = "false" ]; then
+                bashio::log.info "  Flow didn't create entry — triggering Mosquitto discovery..."
+                # Restart Mosquitto to re-trigger its HA discovery
+                bashio::addon.restart "core_mosquitto" 2>/dev/null || true
+                sleep 10
+
+                # Check again
+                ENTRIES3=$(ha_api GET "/config/config_entries/entry" 2>/dev/null || echo "[]")
+                MQTT_NOW2=$(echo "$ENTRIES3" | jq -r '[.[] | select(.domain == "mqtt")] | length' 2>/dev/null || echo "0")
+                if [ "$MQTT_NOW2" != "0" ]; then
+                    bashio::log.info "  MQTT configured via Mosquitto restart discovery"
+                    MQTT_DONE=true
+                fi
+            fi
+
+            # Last resort: create entry directly via broker form
+            if [ "$MQTT_DONE" = "false" ]; then
+                bashio::log.info "  Attempting direct broker configuration..."
+                FLOW2=$(ha_api POST "/config/config_entries/flow" \
+                    '{"handler":"mqtt","show_advanced_options":false}' 2>/dev/null || echo "")
+                FLOW2_ID=$(echo "$FLOW2" | jq -r '.flow_id // empty' 2>/dev/null)
+                FLOW2_TYPE=$(echo "$FLOW2" | jq -r '.type // empty' 2>/dev/null)
+                bashio::log.info "  Direct flow init: type=${FLOW2_TYPE}"
+
+                if [ -n "$FLOW2_ID" ]; then
+                    # If it's a menu, pick "broker" to get the manual form
+                    if [ "$FLOW2_TYPE" = "menu" ]; then
+                        FLOW2=$(ha_api POST "/config/config_entries/flow/${FLOW2_ID}" \
+                            '{"next_step_id":"broker"}' 2>/dev/null)
+                        FLOW2_ID=$(echo "$FLOW2" | jq -r '.flow_id // empty' 2>/dev/null)
+                        FLOW2_TYPE=$(echo "$FLOW2" | jq -r '.type // empty' 2>/dev/null)
+                        bashio::log.info "  After broker select: type=${FLOW2_TYPE} flow_id=${FLOW2_ID}"
+                    fi
+
+                    # Now submit the broker credentials to the form
+                    if [ "$FLOW2_TYPE" = "form" ] && [ -n "$FLOW2_ID" ]; then
+                        RESULT2=$(ha_api POST "/config/config_entries/flow/${FLOW2_ID}" \
+                            "{\"broker\":\"${MQTT_HOST}\",\"port\":1883,\"username\":\"${MQTT_USER}\",\"password\":\"${MQTT_PASSWORD}\"}" 2>/dev/null)
+                        RESULT2_TYPE=$(echo "$RESULT2" | jq -r '.type // empty' 2>/dev/null)
+                        bashio::log.info "  Broker submit: type=${RESULT2_TYPE}"
+                        if [ "$RESULT2_TYPE" = "create_entry" ]; then
+                            bashio::log.info "  MQTT configured via direct broker entry"
+                            MQTT_DONE=true
+                        else
+                            bashio::log.warning "  MQTT direct config: ${RESULT2_TYPE} — configure MQTT manually in Settings"
+                        fi
+                    fi
                 fi
             fi
         else

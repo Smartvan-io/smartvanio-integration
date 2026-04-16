@@ -237,6 +237,13 @@ class SmartVanUpdate(UpdateEntity):
 
             if state in ("downloading", "flashing"):
                 self._attr_in_progress = True
+                # Clear the retained OTA trigger now that device picked it up
+                self.hass.async_create_task(
+                    mqtt.async_publish(
+                        self.hass, self._ota_topic, "",
+                        qos=MQTT_QOS, retain=True,
+                    )
+                )
             elif state == "done":
                 self._attr_in_progress = False
                 _LOGGER.info("OTA %s: flash complete, device rebooting", self._device_id)
@@ -345,29 +352,24 @@ class SmartVanUpdate(UpdateEntity):
     async def async_install(
         self, version: str | None, backup: bool, **kwargs: Any
     ) -> None:
-        """Download firmware from GitHub, serve locally, trigger OTA via MQTT."""
+        """Trigger OTA via MQTT — device downloads firmware directly from GitHub."""
         self._attr_in_progress = True
         self.async_write_ha_state()
 
         try:
-            # Step 1: Download firmware from GitHub to local www dir
-            local_fw_path, local_md5_path = await self._download_firmware()
-
-            # Step 2: Build full URLs using HA's base URL
-            base = self._get_ha_base_url()
-            fw_url = f"{base}{local_fw_path}"
-            md5_url = f"{base}{local_md5_path}"
+            branch = self._branch
+            fw_url = _build_github_firmware_url(self._firmware_type, branch)
+            md5_url = _build_github_md5_url(self._firmware_type, branch)
 
             _LOGGER.info(
-                "Triggering OTA for %s — firmware served at %s",
+                "Triggering OTA for %s — firmware at %s",
                 self._device_id, fw_url,
             )
 
-            # Step 3: Tell device to pull from HA
             payload = json.dumps({"url": fw_url, "md5_url": md5_url})
             await mqtt.async_publish(
                 self.hass, self._ota_topic, payload,
-                qos=MQTT_QOS, retain=False,
+                qos=MQTT_QOS, retain=True,
             )
 
         except Exception as err:

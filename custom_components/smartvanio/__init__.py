@@ -91,6 +91,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
         store["devices"][device_id] = payload
         store["pending_configs"][device_id] = payload
 
+        # Refresh heartbeat — config messages prove the device is alive
+        avail = store["device_availability"]
+        avail.setdefault(device_id, {"available": False, "last_seen": 0})
+        avail[device_id]["last_seen"] = time.monotonic()
+        if not avail[device_id]["available"]:
+            avail[device_id]["available"] = True
+            _LOGGER.debug("Device %s availability: True (via config)", device_id)
+            hass.bus.async_fire(
+                f"{DOMAIN}_device_status",
+                {"device_id": device_id, "available": True},
+            )
+
         # Fire event so platforms can pick up new entities
         hass.bus.async_fire(
             f"{DOMAIN}_device_discovered",
