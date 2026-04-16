@@ -404,7 +404,7 @@ class SmartVanCardUpdate(UpdateEntity):
         self._entry = entry
         self._attr_unique_id = "smartvanio_card"
         self._attr_name = "Dashboard Card"
-        self._attr_installed_version = self._read_installed_version()
+        self._attr_installed_version = None
         self._attr_latest_version = None
         self._attr_in_progress: bool | int = False
         self._release_notes: str | None = None
@@ -439,6 +439,9 @@ class SmartVanCardUpdate(UpdateEntity):
             f.write(version)
 
     async def async_added_to_hass(self) -> None:
+        self._attr_installed_version = await self.hass.async_add_executor_job(
+            self._read_installed_version
+        )
         await self._fetch_manifest()
 
     async def async_update(self) -> None:
@@ -538,7 +541,7 @@ class SmartVanIntegrationUpdate(UpdateEntity):
         self._entry = entry
         self._attr_unique_id = "smartvanio_integration"
         self._attr_name = "Integration"
-        self._attr_installed_version = self._read_installed_version()
+        self._attr_installed_version = None
         self._attr_latest_version = None
         self._attr_in_progress: bool | int = False
         self._release_notes: str | None = None
@@ -568,6 +571,9 @@ class SmartVanIntegrationUpdate(UpdateEntity):
             return None
 
     async def async_added_to_hass(self) -> None:
+        self._attr_installed_version = await self.hass.async_add_executor_job(
+            self._read_installed_version
+        )
         await self._fetch_manifest()
 
     async def async_update(self) -> None:
