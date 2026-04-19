@@ -16,6 +16,7 @@ from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFl
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers import selector
 
 from .const import (
     DOMAIN,
@@ -28,6 +29,22 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Plain text fields — password managers were autofilling generated passwords when type=PASSWORD
+# was used, even with autocomplete="new-password"/"one-time-code". User is already authenticated
+# to HA, so dot-masking provides no security benefit.
+WIFI_PASSWORD_SELECTOR = selector.TextSelector(
+    selector.TextSelectorConfig(
+        type=selector.TextSelectorType.TEXT,
+        autocomplete="off",
+    )
+)
+MQTT_PASSWORD_SELECTOR = selector.TextSelector(
+    selector.TextSelectorConfig(
+        type=selector.TextSelectorType.TEXT,
+        autocomplete="off",
+    )
+)
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
@@ -71,6 +88,13 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         self._device_host: str | None = None
         self._device_on_wifi: bool = False
         self._pending_wifi_ssid: str | None = None
+
+        # Legacy firmware rescue flash state
+        self._flash_host: str | None = None
+        self._flash_firmware_type: str | None = None
+        self._flash_branch: str = "beta"
+        self._flash_task: asyncio.Task | None = None
+        self._flash_error: str | None = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -131,9 +155,120 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
             _LOGGER.info("Device %s already on MQTT, skipping provisioning", name)
             return self._create_or_update_entry()
 
+        # Legacy firmware has no /provision endpoint — offer rescue flash instead
+        # of the normal MQTT provisioning form.
+        if not await self._device_supports_provisioning(host):
+            _LOGGER.info(
+                "Device %s (%s) looks like legacy firmware — routing to rescue flash",
+                name, host,
+            )
+            self._flash_host = host
+            self._flash_firmware_type = _guess_firmware_type(name)
+            self._flash_branch = (
+                "beta"
+                if self._get_existing_beta_channel()
+                else "main"
+            )
+            self.context["title_placeholders"] = {"name": name}
+            return await self.async_step_flash_legacy()
+
         # Device on WiFi but not MQTT — show MQTT credentials form
         self.context["title_placeholders"] = {"name": name}
         return await self._show_zeroconf_mqtt_form()
+
+    def _get_existing_beta_channel(self) -> bool:
+        """Read beta-channel preference from the existing hub entry, if any."""
+        for entry in self.hass.config_entries.async_entries(DOMAIN):
+            return entry.data.get(CONF_BETA_CHANNEL, DEFAULT_BETA_CHANNEL)
+        return DEFAULT_BETA_CHANNEL
+
+    # ── Legacy rescue flash ─────────────────────────────────────
+
+    async def async_step_flash_legacy(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask the user to confirm firmware type + host, then flash."""
+        if user_input is None:
+            schema_dict: dict = {
+                vol.Required("host", default=self._flash_host or ""): str,
+            }
+            if self._flash_firmware_type:
+                schema_dict[vol.Required(
+                    "firmware_type", default=self._flash_firmware_type
+                )] = vol.In(FIRMWARE_TYPES)
+            else:
+                schema_dict[vol.Required("firmware_type")] = vol.In(FIRMWARE_TYPES)
+            schema_dict[vol.Required("branch", default=self._flash_branch)] = vol.In(
+                ["beta", "main"]
+            )
+            return self.async_show_form(
+                step_id="flash_legacy",
+                data_schema=vol.Schema(schema_dict),
+                description_placeholders={"name": self._device_name or ""},
+            )
+
+        self._flash_host = user_input["host"].strip()
+        self._flash_firmware_type = user_input["firmware_type"]
+        self._flash_branch = user_input["branch"]
+        self._flash_task = None
+        self._flash_error = None
+        return await self.async_step_flash_progress()
+
+    async def async_step_flash_progress(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if self._flash_task is None:
+            self._flash_task = self.hass.async_create_task(
+                _run_legacy_flash(
+                    self.hass,
+                    self._flash_host,
+                    self._flash_firmware_type,
+                    self._flash_branch,
+                )
+            )
+
+        if not self._flash_task.done():
+            return self.async_show_progress(
+                step_id="flash_progress",
+                progress_action="flashing",
+                progress_task=self._flash_task,
+            )
+
+        err = self._flash_task.exception()
+        if err is not None:
+            self._flash_error = str(err)
+            return self.async_show_progress_done(next_step_id="flash_failure")
+        return self.async_show_progress_done(next_step_id="flash_success")
+
+    async def async_step_flash_success(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_abort(reason="flash_success")
+
+    async def async_step_flash_failure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_abort(
+            reason="flash_failed",
+            description_placeholders={"error": self._flash_error or "unknown"},
+        )
+
+    async def _device_supports_provisioning(self, host: str) -> bool:
+        """Probe the device's HTTP /provision endpoint.
+
+        New firmware's /provision accepts POST; a GET typically returns 200,
+        204, 400 (bad request) or 405 (method not allowed). Legacy firmware
+        without the endpoint returns 404, or ESPHome's default web_server
+        can return 500 for unhandled routes. Treat anything outside the known
+        new-firmware response set as legacy.
+        """
+        url = f"http://{host}/provision"
+        try:
+            session = async_get_clientsession(self.hass)
+            async with session.get(url, timeout=5, allow_redirects=False) as resp:
+                return resp.status in (200, 204, 400, 405)
+        except Exception:  # noqa: BLE001
+            return False
 
     async def _show_zeroconf_mqtt_form(
         self, errors: dict[str, str] | None = None
@@ -154,7 +289,7 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
                     ): str,
                     vol.Optional(
                         "mqtt_password", default=mqtt_creds["password"]
-                    ): str,
+                    ): MQTT_PASSWORD_SELECTOR,
                 }
             ),
             errors=errors or {},
@@ -438,7 +573,7 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
                     ): str,
                     vol.Optional(
                         "mqtt_password", default=mqtt_creds["password"]
-                    ): str,
+                    ): MQTT_PASSWORD_SELECTOR,
                 }
             ),
             errors=errors or {},
@@ -466,14 +601,14 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required("wifi_ssid", default=default_ssid): str,
-                    vol.Optional("wifi_password", default=""): str,
+                    vol.Optional("wifi_password", default=""): WIFI_PASSWORD_SELECTOR,
                     vol.Required("mqtt_broker", default=default_broker): str,
                     vol.Optional(
                         "mqtt_username", default=mqtt_creds["username"]
                     ): str,
                     vol.Optional(
                         "mqtt_password", default=mqtt_creds["password"]
-                    ): str,
+                    ): MQTT_PASSWORD_SELECTOR,
                 }
             ),
             errors=errors or {},
@@ -662,17 +797,153 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
             return False
 
 
+FIRMWARE_TYPES = [
+    "inclinometer",
+    "resistive_sensor",
+    "led",
+    "gledopto_din",
+    "truma",
+    "sonoff_m5_3g",
+]
+
+# Hostname keyword → firmware_type guess for legacy zeroconf devices.
+# "led" is ambiguous (LED.yaml vs LED_GLEDOPTO_DIN.yaml) — user must confirm.
+_NAME_TO_FIRMWARE_TYPE = {
+    "res": "resistive_sensor",
+    "inclinometer": "inclinometer",
+    "truma": "truma",
+    "switch": "sonoff_m5_3g",
+    "led": "led",
+}
+
+
+def _guess_firmware_type(device_name: str | None) -> str | None:
+    if not device_name:
+        return None
+    lowered = device_name.lower()
+    for kw, fw_type in _NAME_TO_FIRMWARE_TYPE.items():
+        if kw in lowered:
+            return fw_type
+    return None
+
+
+def _build_bin_url(firmware_type: str, branch: str, filename: str) -> str:
+    return (
+        f"https://raw.githubusercontent.com/Smartvan-io/"
+        f"{firmware_type}.bin/refs/heads/{branch}/{filename}"
+    )
+
+
+async def _discover_legacy_candidates(
+    hass: HomeAssistant,
+) -> list[dict[str, str]]:
+    """Browse mDNS for `_smartvaniolib._tcp` and return device candidates.
+
+    Each candidate is {name, host, firmware_type}. Firmware type is derived
+    from the hostname, falling back to None if it can't be guessed.
+    """
+
+    def _blocking_browse() -> list[dict[str, str]]:
+        from zeroconf import ServiceBrowser, Zeroconf
+        import socket
+        import threading
+
+        results: dict[str, dict[str, str]] = {}
+        done = threading.Event()
+
+        class Listener:
+            def add_service(self, zc: "Zeroconf", stype: str, name: str) -> None:
+                try:
+                    info = zc.get_service_info(stype, name, timeout=2000)
+                except Exception:
+                    return
+                if not info:
+                    return
+                host = None
+                for addr in info.addresses or []:
+                    try:
+                        host = socket.inet_ntoa(addr)
+                        break
+                    except OSError:
+                        continue
+                if not host:
+                    return
+                short_name = name.split(".")[0]
+                results[host] = {
+                    "name": short_name,
+                    "host": host,
+                    "firmware_type": _guess_firmware_type(short_name) or "",
+                }
+
+            def remove_service(self, zc, stype, name): pass
+            def update_service(self, zc, stype, name): pass
+
+        zc = Zeroconf()
+        browser = ServiceBrowser(zc, "_smartvaniolib._tcp.local.", Listener())
+        try:
+            done.wait(timeout=3.5)
+        finally:
+            browser.cancel()
+            zc.close()
+
+        return sorted(results.values(), key=lambda x: x["name"])
+
+    try:
+        return await hass.async_add_executor_job(_blocking_browse)
+    except Exception:  # noqa: BLE001
+        _LOGGER.exception("mDNS browse for legacy candidates failed")
+        return []
+
+
+async def _run_legacy_flash(
+    hass: HomeAssistant, host: str, firmware_type: str, branch: str
+) -> None:
+    """Download firmware from GitHub and push via native ESPHome OTA."""
+    from .ota_native import run_ota as run_native_ota
+
+    fw_url = _build_bin_url(firmware_type, branch, "firmware.bin")
+    _LOGGER.info(
+        "Legacy rescue flash: downloading %s for %s → %s", fw_url, firmware_type, host
+    )
+
+    session = async_get_clientsession(hass)
+    async with session.get(fw_url, timeout=120) as resp:
+        if resp.status != 200:
+            raise Exception(
+                f"Firmware download failed: HTTP {resp.status} for {fw_url}"
+            )
+        binary = await resp.read()
+
+    _LOGGER.info(
+        "Legacy rescue flash: pushing %d bytes to %s via native OTA", len(binary), host
+    )
+    await run_native_ota(host, binary)
+    _LOGGER.info("Legacy rescue flash: completed successfully for %s", host)
+
+
 class SmartVanOptionsFlow(OptionsFlow):
-    """Handle SmartVan.io options (beta channel toggle)."""
+    """Handle SmartVan.io options (settings + legacy device rescue flash)."""
 
     def __init__(self, config_entry: ConfigEntry) -> None:
         self._config_entry = config_entry
+        self._flash_host: str | None = None
+        self._flash_firmware_type: str | None = None
+        self._flash_branch: str = "beta"
+        self._flash_task: asyncio.Task | None = None
+        self._flash_error: str | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=["settings", "flash_legacy"],
+        )
+
+    async def async_step_settings(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
         if user_input is not None:
-            # Merge into the main config entry data so update.py can read it
             new_data = {**self._config_entry.data, **user_input}
             self.hass.config_entries.async_update_entry(
                 self._config_entry, data=new_data
@@ -683,12 +954,101 @@ class SmartVanOptionsFlow(OptionsFlow):
             CONF_BETA_CHANNEL, DEFAULT_BETA_CHANNEL
         )
         return self.async_show_form(
-            step_id="init",
+            step_id="settings",
             data_schema=vol.Schema(
                 {
                     vol.Optional(CONF_BETA_CHANNEL, default=current_beta): bool,
                 }
             ),
+        )
+
+    async def async_step_flash_legacy(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Auto-discover SmartVan.io devices and let the user pick one to flash.
+
+        The integration does the mDNS browse, derives the firmware type from
+        the hostname, and uses the current beta/main channel setting. The only
+        decision the user makes is which device to flash.
+        """
+        self._flash_branch = (
+            "beta"
+            if self._config_entry.data.get(CONF_BETA_CHANNEL, DEFAULT_BETA_CHANNEL)
+            else "main"
+        )
+
+        candidates = await _discover_legacy_candidates(self.hass)
+        usable = [c for c in candidates if c["firmware_type"]]
+
+        if user_input is not None:
+            picked = user_input["device"]
+            for c in candidates:
+                if f"{c['host']}|{c['firmware_type']}" == picked:
+                    self._flash_host = c["host"]
+                    self._flash_firmware_type = c["firmware_type"]
+                    self._flash_task = None
+                    self._flash_error = None
+                    return await self.async_step_flash_progress()
+            return self.async_abort(reason="flash_failed",
+                                    description_placeholders={"error": "device vanished"})
+
+        if not usable:
+            return self.async_abort(reason="no_legacy_devices_found")
+
+        options = {
+            f"{c['host']}|{c['firmware_type']}":
+                f"{c['name']} — {c['host']} ({c['firmware_type']})"
+            for c in usable
+        }
+        return self.async_show_form(
+            step_id="flash_legacy",
+            data_schema=vol.Schema(
+                {vol.Required("device"): vol.In(options)}
+            ),
+            description_placeholders={"count": str(len(usable)), "channel": self._flash_branch},
+        )
+
+    async def async_step_flash_progress(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Show progress while the native OTA runs."""
+        if self._flash_task is None:
+            self._flash_task = self.hass.async_create_task(
+                self._do_legacy_flash()
+            )
+
+        if not self._flash_task.done():
+            return self.async_show_progress(
+                step_id="flash_progress",
+                progress_action="flashing",
+                progress_task=self._flash_task,
+            )
+
+        err = self._flash_task.exception()
+        if err is not None:
+            self._flash_error = str(err)
+            return self.async_show_progress_done(next_step_id="flash_failure")
+        return self.async_show_progress_done(next_step_id="flash_success")
+
+    async def async_step_flash_success(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_abort(reason="flash_success")
+
+    async def async_step_flash_failure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_abort(
+            reason="flash_failed",
+            description_placeholders={"error": self._flash_error or "unknown"},
+        )
+
+    async def _do_legacy_flash(self) -> None:
+        await _run_legacy_flash(
+            self.hass,
+            self._flash_host,
+            self._flash_firmware_type,
+            self._flash_branch,
         )
 
 

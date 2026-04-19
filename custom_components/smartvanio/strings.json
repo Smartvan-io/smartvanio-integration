@@ -49,6 +49,26 @@
         "title": "Waiting for {name}",
         "description": "Credentials were sent to the device. Waiting for it to connect to WiFi and MQTT. This may take up to 60 seconds.",
         "submit_label": "Retry with different credentials"
+      },
+      "flash_legacy": {
+        "title": "Update legacy device: {name}",
+        "description": "This device is running firmware older than v1.2. Before it can be provisioned, it needs to be updated. Confirm the details below and click Submit to push the latest firmware via ESPHome native OTA (TCP port 3232).",
+        "data": {
+          "host": "Device IP address",
+          "firmware_type": "Firmware type",
+          "branch": "Release channel"
+        },
+        "data_description": {
+          "host": "Local network IP of the device",
+          "firmware_type": "Must match the device's hardware — picking the wrong type will brick the device",
+          "branch": "beta = latest test build, main = latest stable"
+        }
+      },
+      "flash_progress": {
+        "title": "Flashing firmware",
+        "progress": {
+          "flashing": "Downloading firmware and pushing to device — do not power off the device."
+        }
       }
     },
     "error": {
@@ -63,20 +83,51 @@
     },
     "abort": {
       "already_configured": "This device is already configured.",
-      "device_provisioned": "Device connected successfully."
+      "device_provisioned": "Device connected successfully.",
+      "legacy_firmware": "This device is running an older firmware version that predates the SmartVan.io managed setup flow. Please update the firmware (via the HA update entity or by reflashing) and then try adding it again.",
+      "flash_success": "Firmware flashed successfully. The device will reboot and reconnect on its own — it should reappear in Discovered in a minute or two.",
+      "flash_failed": "Firmware flash failed: {error}"
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "SmartVan.io Options",
+        "menu_options": {
+          "settings": "Settings (beta channel)",
+          "flash_legacy": "Flash legacy device (native OTA)"
+        }
+      },
+      "settings": {
+        "title": "SmartVan.io Settings",
         "data": {
           "beta_channel": "Beta firmware channel"
         },
         "data_description": {
           "beta_channel": "Enable to receive beta firmware updates. Disable for stable releases only."
         }
+      },
+      "flash_legacy": {
+        "title": "Flash legacy device",
+        "description": "Found {count} SmartVan.io device(s) on the network. Pick one to push the latest firmware ({channel} channel) — used when a device is still running older firmware that predates the managed OTA pipeline.",
+        "data": {
+          "device": "Device"
+        },
+        "data_description": {
+          "device": "The firmware type is auto-detected from the device's mDNS hostname."
+        }
+      },
+      "flash_progress": {
+        "title": "Flashing firmware",
+        "progress": {
+          "flashing": "Downloading firmware and pushing to device — do not power off the device."
+        }
       }
+    },
+    "abort": {
+      "flash_success": "Firmware flashed successfully. The device will reboot and reconnect on its own.",
+      "flash_failed": "Firmware flash failed: {error}",
+      "no_legacy_devices_found": "No SmartVan.io devices were found on the network via mDNS. Make sure the device is powered on and connected to the same WiFi as Home Assistant."
     }
   }
 }

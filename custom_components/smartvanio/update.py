@@ -49,6 +49,7 @@ from .const import (
     FIRMWARE_GITHUB_ORG,
     FIRMWARE_MANIFEST_FILENAME,
 )
+from .ota_native import run_ota as run_native_ota, OTAError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -123,8 +124,9 @@ async def async_setup_entry(
             new_ver = config.get("firmware")
             if new_ver and new_ver != existing._attr_installed_version:
                 existing._attr_installed_version = new_ver
-                if existing._attr_in_progress is not False:
+                if existing._attr_in_progress:
                     existing._attr_in_progress = False
+                    existing._attr_update_percentage = None
                     _LOGGER.info(
                         "OTA complete for %s — now running %s",
                         device_id, new_ver,
@@ -181,12 +183,18 @@ class SmartVanUpdate(UpdateEntity):
         self._attr_installed_version = device_config.get("firmware")
         self._attr_latest_version = None
         self._attr_available = True
-        self._attr_in_progress: bool | int = False
+        self._attr_in_progress: bool = False
+        self._attr_update_percentage: int | None = None
         self._release_notes: str | None = None
 
         self._ota_topic = f"{device_id}/ota/update"
         self._ota_state_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/ota/state"
         self._status_topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/status"
+
+        # Tracks whether the device acknowledged the MQTT OTA trigger at all.
+        # If not, we fall back to native ESPHome OTA for old firmware.
+        self._ota_state_heard: bool = False
+        self._fallback_task: asyncio.Task | None = None
 
     @property
     def device_info(self) -> DeviceInfo:
@@ -213,8 +221,9 @@ class SmartVanUpdate(UpdateEntity):
             online = payload.get("state") == "online"
             self._attr_available = online
             # Device came back online after OTA — clear progress
-            if online and self._attr_in_progress is not False:
+            if online and self._attr_in_progress:
                 self._attr_in_progress = False
+                self._attr_update_percentage = None
                 _LOGGER.info(
                     "OTA %s: device back online after update",
                     self._device_id,
@@ -235,8 +244,19 @@ class SmartVanUpdate(UpdateEntity):
             state = payload.get("state", "")
             progress = payload.get("progress")
 
+            # Any state message proves the device heard the MQTT OTA trigger,
+            # so cancel the pending native-OTA fallback.
+            self._ota_state_heard = True
+            if self._fallback_task and not self._fallback_task.done():
+                self._fallback_task.cancel()
+                self._fallback_task = None
+
             if state in ("downloading", "flashing"):
                 self._attr_in_progress = True
+                if isinstance(progress, (int, float)):
+                    self._attr_update_percentage = int(progress)
+                else:
+                    self._attr_update_percentage = None
                 # Clear the retained OTA trigger now that device picked it up
                 self.hass.async_create_task(
                     mqtt.async_publish(
@@ -245,10 +265,11 @@ class SmartVanUpdate(UpdateEntity):
                     )
                 )
             elif state == "done":
-                self._attr_in_progress = False
+                self._attr_update_percentage = 100
                 _LOGGER.info("OTA %s: flash complete, device rebooting", self._device_id)
             elif state == "error":
                 self._attr_in_progress = False
+                self._attr_update_percentage = None
                 _LOGGER.error("OTA %s failed: %s", self._device_id, payload.get("error", "unknown"))
 
             self.async_write_ha_state()
@@ -352,44 +373,139 @@ class SmartVanUpdate(UpdateEntity):
     async def async_install(
         self, version: str | None, backup: bool, **kwargs: Any
     ) -> None:
-        """Trigger OTA via MQTT — device downloads firmware directly from GitHub."""
+        """Trigger OTA via MQTT, then fall back to native OTA for old firmware.
+
+        New firmware subscribes to `{device_name}/ota/update` and pulls from
+        GitHub. Old firmware doesn't — if no `ota/state` message arrives within
+        ~15s, we push the binary directly over TCP (port 3232).
+        """
         self._attr_in_progress = True
+        self._attr_update_percentage = None
+        self._ota_state_heard = False
         self.async_write_ha_state()
 
-        try:
-            branch = self._branch
-            fw_url = _build_github_firmware_url(self._firmware_type, branch)
-            md5_url = _build_github_md5_url(self._firmware_type, branch)
+        branch = self._branch
+        fw_url = _build_github_firmware_url(self._firmware_type, branch)
+        md5_url = _build_github_md5_url(self._firmware_type, branch)
 
+        try:
             _LOGGER.info(
-                "Triggering OTA for %s — firmware at %s",
+                "Triggering MQTT OTA for %s — firmware at %s",
                 self._device_id, fw_url,
             )
-
             payload = json.dumps({"url": fw_url, "md5_url": md5_url})
             await mqtt.async_publish(
                 self.hass, self._ota_topic, payload,
                 qos=MQTT_QOS, retain=True,
             )
-
         except Exception as err:
-            _LOGGER.error("OTA failed for %s: %s", self._device_id, err)
+            _LOGGER.error("MQTT OTA publish failed for %s: %s", self._device_id, err)
             self._attr_in_progress = False
+            self._attr_update_percentage = None
             self.async_write_ha_state()
             return
 
-        # Timeout guard — reset progress if no response in 120s
-        async def _timeout_guard():
-            await asyncio.sleep(120)
-            if self._attr_in_progress is not False:
-                _LOGGER.warning(
-                    "OTA timeout for %s — no progress in 120s",
-                    self._device_id,
-                )
-                self._attr_in_progress = False
-                self.async_write_ha_state()
+        # Arm a fallback to native OTA — it runs after a short grace period,
+        # but is cancelled if the device responds on the ota/state topic.
+        self._fallback_task = self.hass.async_create_task(
+            self._mqtt_or_native_fallback(fw_url)
+        )
 
-        self.hass.async_create_task(_timeout_guard())
+    async def _mqtt_or_native_fallback(self, fw_url: str) -> None:
+        """Wait for MQTT OTA ack; fall back to native OTA if silent."""
+        try:
+            await asyncio.sleep(15)
+        except asyncio.CancelledError:
+            return
+
+        if self._ota_state_heard:
+            # Device picked up the MQTT OTA — nothing more for us to do.
+            # _ota_state_received handles progress + final timeout.
+            async def _late_timeout():
+                try:
+                    await asyncio.sleep(120)
+                except asyncio.CancelledError:
+                    return
+                if self._attr_in_progress:
+                    _LOGGER.warning(
+                        "OTA timeout for %s — no progress in 2 min",
+                        self._device_id,
+                    )
+                    self._attr_in_progress = False
+                    self._attr_update_percentage = None
+                    self.async_write_ha_state()
+            self._fallback_task = self.hass.async_create_task(_late_timeout())
+            return
+
+        # Old firmware — push firmware over native ESPHome OTA.
+        host = self._device_config.get("ip")
+        if not host:
+            _LOGGER.error(
+                "Native OTA fallback for %s: no IP in device config — cannot reach device",
+                self._device_id,
+            )
+            self._attr_in_progress = False
+            self._attr_update_percentage = None
+            self.async_write_ha_state()
+            return
+
+        _LOGGER.info(
+            "MQTT OTA silent after 15s — falling back to native OTA for %s at %s",
+            self._device_id, host,
+        )
+
+        # Clear retained MQTT OTA trigger so the device doesn't re-apply it on
+        # its first boot into the new firmware.
+        try:
+            await mqtt.async_publish(
+                self.hass, self._ota_topic, "", qos=MQTT_QOS, retain=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            binary = await self._fetch_github_bytes(fw_url)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.error(
+                "Native OTA fallback for %s: firmware download failed: %s",
+                self._device_id, err,
+            )
+            self._attr_in_progress = False
+            self._attr_update_percentage = None
+            self.async_write_ha_state()
+            return
+
+        def _on_progress(pct: int) -> None:
+            self._attr_update_percentage = pct
+            self.async_write_ha_state()
+
+        try:
+            await run_native_ota(host, binary, progress=_on_progress)
+            # Device is rebooting — config-payload listener will pick up the
+            # new version and clear in_progress in _create_update_from_config.
+            self._attr_update_percentage = 100
+            self.async_write_ha_state()
+            _LOGGER.info(
+                "Native OTA for %s succeeded — waiting for device reboot",
+                self._device_id,
+            )
+        except OTAError as err:
+            _LOGGER.error("Native OTA for %s failed: %s", self._device_id, err)
+            self._attr_in_progress = False
+            self._attr_update_percentage = None
+            self.async_write_ha_state()
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.exception("Native OTA for %s unexpected error: %s", self._device_id, err)
+            self._attr_in_progress = False
+            self._attr_update_percentage = None
+            self.async_write_ha_state()
+
+    async def _fetch_github_bytes(self, url: str) -> bytes:
+        session = async_get_clientsession(self.hass)
+        async with session.get(url, timeout=120) as resp:
+            if resp.status != 200:
+                raise Exception(f"HTTP {resp.status} fetching {url}")
+            return await resp.read()
 
 
 class SmartVanCardUpdate(UpdateEntity):
@@ -408,7 +524,7 @@ class SmartVanCardUpdate(UpdateEntity):
         self._attr_name = "Dashboard Card"
         self._attr_installed_version = None
         self._attr_latest_version = None
-        self._attr_in_progress: bool | int = False
+        self._attr_in_progress: bool = False
         self._release_notes: str | None = None
         self._attr_entity_picture = "https://smartvan.io/icon.png"
 
@@ -545,7 +661,7 @@ class SmartVanIntegrationUpdate(UpdateEntity):
         self._attr_name = "Integration"
         self._attr_installed_version = None
         self._attr_latest_version = None
-        self._attr_in_progress: bool | int = False
+        self._attr_in_progress: bool = False
         self._release_notes: str | None = None
         self._attr_entity_picture = "https://smartvan.io/icon.png"
 
