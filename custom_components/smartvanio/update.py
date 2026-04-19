@@ -744,7 +744,9 @@ class SmartVanIntegrationUpdate(UpdateEntity):
                 self._clone_and_install, repo_url, branch
             )
 
-            new_version = self._read_installed_version()
+            new_version = await self.hass.async_add_executor_job(
+                self._read_installed_version
+            )
             if new_version:
                 self._attr_installed_version = new_version
 
