@@ -95,6 +95,11 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         self._flash_branch: str = "beta"
         self._flash_task: asyncio.Task | None = None
         self._flash_error: str | None = None
+        # Post-flash: polls the device's new /provision endpoint until
+        # it comes back from reboot, then we hand off to the existing
+        # zeroconf MQTT form so the user provisions in one continuous
+        # flow instead of being aborted out.
+        self._post_flash_task: asyncio.Task | None = None
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -241,12 +246,82 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         if err is not None:
             self._flash_error = str(err)
             return self.async_show_progress_done(next_step_id="flash_failure")
-        return self.async_show_progress_done(next_step_id="flash_success")
+        return self.async_show_progress_done(next_step_id="post_flash_wait")
 
-    async def async_step_flash_success(
+    async def async_step_post_flash_wait(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        return self.async_abort(reason="flash_success")
+        """Wait for the freshly-flashed device to reboot into new firmware.
+
+        New firmware exposes /provision on HTTP, so we poll the same IP
+        until it responds — typically 20-40s after a successful OTA. On
+        success we drop into the existing zeroconf MQTT form so the user
+        finishes provisioning in one continuous flow. We can't fall back
+        to BLE because legacy devices were already on WiFi when flashed.
+        """
+        if self._post_flash_task is None:
+            self._post_flash_task = self.hass.async_create_task(
+                self._wait_for_provision_endpoint(
+                    self._flash_host, timeout=120
+                )
+            )
+
+        if not self._post_flash_task.done():
+            return self.async_show_progress(
+                step_id="post_flash_wait",
+                progress_action="waiting_for_reboot",
+                progress_task=self._post_flash_task,
+            )
+
+        came_back = bool(self._post_flash_task.result())
+        if not came_back:
+            return self.async_show_progress_done(
+                next_step_id="post_flash_unreachable"
+            )
+
+        # Treat the post-flash device exactly like a fresh zeroconf
+        # discovery — it's on WiFi, on the same IP, with the new
+        # firmware's /provision endpoint live.
+        self._device_host = self._flash_host
+        self._device_on_wifi = True
+        return self.async_show_progress_done(next_step_id="zeroconf_confirm")
+
+    async def async_step_post_flash_unreachable(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        return self.async_abort(
+            reason="post_flash_unreachable",
+            description_placeholders={
+                "host": self._flash_host or "",
+                "name": self._device_name or "device",
+            },
+        )
+
+    async def _wait_for_provision_endpoint(
+        self, host: str | None, timeout: int = 120
+    ) -> bool:
+        """Poll http://<host>/provision until it answers (or timeout).
+
+        Reuses the same response-code rule as _device_supports_provisioning.
+        2s sleep between attempts; the first 15-20s typically yield
+        connection refused (boot in progress), then a normal HTTP
+        response once WiFi is up and the web server is listening.
+        """
+        if not host:
+            return False
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
+        session = async_get_clientsession(self.hass)
+        url = f"http://{host}/provision"
+        while loop.time() < deadline:
+            try:
+                async with session.get(url, timeout=3, allow_redirects=False) as resp:
+                    if resp.status in (200, 204, 400, 405):
+                        return True
+            except Exception:  # noqa: BLE001
+                pass
+            await asyncio.sleep(2)
+        return False
 
     async def async_step_flash_failure(
         self, user_input: dict[str, Any] | None = None

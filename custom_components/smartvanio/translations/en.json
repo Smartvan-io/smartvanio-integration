@@ -65,6 +65,12 @@
         "progress": {
           "flashing": "Downloading firmware and pushing to device — do not power off the device."
         }
+      },
+      "post_flash_wait": {
+        "title": "Waiting for {name} to reboot",
+        "progress": {
+          "waiting_for_reboot": "Firmware flashed. Waiting for the device to reboot and reconnect to WiFi — this usually takes 20-40 seconds."
+        }
       }
     },
     "error": {
@@ -83,7 +89,8 @@
       "legacy_firmware": "This device is running an older firmware version that predates the SmartVan.io managed setup flow. Please update the firmware (via the HA update entity or by reflashing) and then try adding it again.",
       "flash_success": "Firmware flashed successfully. The device will reboot and reconnect on its own — it should reappear in Discovered in a minute or two.",
       "flash_failed": "Firmware flash failed: {error}",
-      "unknown_firmware_type": "Couldn't tell what kind of device {name} is from its hostname, so we can't safely flash it. Reflash it manually with the correct firmware, then add it again."
+      "unknown_firmware_type": "Couldn't tell what kind of device {name} is from its hostname, so we can't safely flash it. Reflash it manually with the correct firmware, then add it again.",
+      "post_flash_unreachable": "Couldn't reach {name} at {host} after the flash completed. The device may have changed IP address. It should appear in Discovered automatically once it broadcasts on mDNS — check back in a minute."
     }
   },
   "options": {
