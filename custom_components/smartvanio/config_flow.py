@@ -160,24 +160,19 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
             _LOGGER.info("Device %s already on MQTT, skipping provisioning", name)
             return self._create_or_update_entry()
 
-        # Legacy firmware has no /provision endpoint — offer rescue flash instead
-        # of the normal MQTT provisioning form.
-        if not await self._device_supports_provisioning(host):
-            _LOGGER.info(
-                "Device %s (%s) looks like legacy firmware — routing to rescue flash",
-                name, host,
-            )
-            self._flash_host = host
-            self._flash_firmware_type = _guess_firmware_type(name)
-            self._flash_branch = (
-                "beta"
-                if self._get_existing_beta_channel()
-                else "main"
-            )
-            self.context["title_placeholders"] = {"name": name}
-            return await self.async_step_flash_legacy()
-
-        # Device on WiFi but not MQTT — show MQTT credentials form
+        # Device is on WiFi (we discovered it via mDNS) but isn't talking
+        # to MQTT yet. Show the credential form. The earlier /provision
+        # presence probe was the wrong gate: only LED firmware registers
+        # the HTTP /provision handler, so resistive/inclinometer/etc. used
+        # to get falsely flagged as 'legacy' and routed straight to a
+        # re-flash before the user could enter their broker. Remember the
+        # firmware-type guess + the host so the user can still flash from
+        # an error state if /provision genuinely isn't there.
+        self._flash_host = host
+        self._flash_firmware_type = _guess_firmware_type(name)
+        self._flash_branch = (
+            "beta" if self._get_existing_beta_channel() else "main"
+        )
         self.context["title_placeholders"] = {"name": name}
         return await self._show_zeroconf_mqtt_form()
 
