@@ -52,16 +52,12 @@
       },
       "flash_legacy": {
         "title": "Update legacy device: {name}",
-        "description": "This device is running firmware older than v1.2. Before it can be provisioned, it needs to be updated. Confirm the details below and click Submit to push the latest firmware via ESPHome native OTA (TCP port 3232).",
+        "description": "This device is running firmware older than v1.2 ({firmware_type}). Before it can be provisioned, it needs to be updated. Confirm the IP and click Submit to push the latest firmware via ESPHome native OTA (TCP port 3232).",
         "data": {
-          "host": "Device IP address",
-          "firmware_type": "Firmware type",
-          "branch": "Release channel"
+          "host": "Device IP address"
         },
         "data_description": {
-          "host": "Local network IP of the device",
-          "firmware_type": "Must match the device's hardware — picking the wrong type will brick the device",
-          "branch": "beta = latest test build, main = latest stable"
+          "host": "Local network IP of the device"
         }
       },
       "flash_progress": {
@@ -86,7 +82,8 @@
       "device_provisioned": "Device connected successfully.",
       "legacy_firmware": "This device is running an older firmware version that predates the SmartVan.io managed setup flow. Please update the firmware (via the HA update entity or by reflashing) and then try adding it again.",
       "flash_success": "Firmware flashed successfully. The device will reboot and reconnect on its own — it should reappear in Discovered in a minute or two.",
-      "flash_failed": "Firmware flash failed: {error}"
+      "flash_failed": "Firmware flash failed: {error}",
+      "unknown_firmware_type": "Couldn't tell what kind of device {name} is from its hostname, so we can't safely flash it. Reflash it manually with the correct firmware, then add it again."
     }
   },
   "options": {

@@ -187,29 +187,32 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_flash_legacy(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Ask the user to confirm firmware type + host, then flash."""
-        if user_input is None:
-            schema_dict: dict = {
-                vol.Required("host", default=self._flash_host or ""): str,
-            }
-            if self._flash_firmware_type:
-                schema_dict[vol.Required(
-                    "firmware_type", default=self._flash_firmware_type
-                )] = vol.In(FIRMWARE_TYPES)
-            else:
-                schema_dict[vol.Required("firmware_type")] = vol.In(FIRMWARE_TYPES)
-            schema_dict[vol.Required("branch", default=self._flash_branch)] = vol.In(
-                ["beta", "main"]
+        """Confirm host (firmware type is auto-derived from the hostname).
+
+        Asking the user to pick a firmware type was both a security
+        footgun (wrong choice bricks the device) and a UX failure for a
+        flow that already knows what kind of device it's talking to.
+        If we can't guess, abort cleanly rather than guess wrong.
+        """
+        if not self._flash_firmware_type:
+            return self.async_abort(
+                reason="unknown_firmware_type",
+                description_placeholders={"name": self._device_name or "device"},
             )
+
+        if user_input is None:
             return self.async_show_form(
                 step_id="flash_legacy",
-                data_schema=vol.Schema(schema_dict),
-                description_placeholders={"name": self._device_name or ""},
+                data_schema=vol.Schema(
+                    {vol.Required("host", default=self._flash_host or ""): str}
+                ),
+                description_placeholders={
+                    "name": self._device_name or "",
+                    "firmware_type": self._flash_firmware_type,
+                },
             )
 
         self._flash_host = user_input["host"].strip()
-        self._flash_firmware_type = user_input["firmware_type"]
-        self._flash_branch = user_input["branch"]
         self._flash_task = None
         self._flash_error = None
         return await self.async_step_flash_progress()
