@@ -51,14 +51,8 @@
         "submit_label": "Retry with different credentials"
       },
       "flash_legacy": {
-        "title": "Update legacy device: {name}",
-        "description": "This device is running firmware older than v1.2 ({firmware_type}). Before it can be provisioned, it needs to be updated. Confirm the IP and click Submit to push the latest firmware via ESPHome native OTA (TCP port 3232).",
-        "data": {
-          "host": "Device IP address"
-        },
-        "data_description": {
-          "host": "Local network IP of the device"
-        }
+        "title": "Update {name} before provisioning",
+        "description": "Legacy {firmware_type} detected. The current firmware on this device will need to be updated in order to continue working with this version of the integration"
       },
       "flash_progress": {
         "title": "Flashing firmware",
@@ -67,7 +61,7 @@
         }
       },
       "post_flash_wait": {
-        "title": "Waiting for {name} to reboot",
+        "title": "Waiting for device to reboot",
         "progress": {
           "waiting_for_reboot": "Firmware flashed. Waiting for the device to reboot and reconnect to WiFi — this usually takes 20-40 seconds."
         }
@@ -86,8 +80,6 @@
     "abort": {
       "already_configured": "This device is already configured.",
       "device_provisioned": "Device connected successfully.",
-      "legacy_firmware": "This device is running an older firmware version that predates the SmartVan.io managed setup flow. Please update the firmware (via the HA update entity or by reflashing) and then try adding it again.",
-      "flash_success": "Firmware flashed successfully. The device will reboot and reconnect on its own — it should reappear in Discovered in a minute or two.",
       "flash_failed": "Firmware flash failed: {error}",
       "unknown_firmware_type": "Couldn't tell what kind of device {name} is from its hostname, so we can't safely flash it. Reflash it manually with the correct firmware, then add it again.",
       "post_flash_unreachable": "Couldn't reach {name} at {host} after the flash completed. The device may have changed IP address. It should appear in Discovered automatically once it broadcasts on mDNS — check back in a minute."

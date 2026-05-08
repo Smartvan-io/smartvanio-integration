@@ -101,6 +101,11 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         # flow instead of being aborted out.
         self._post_flash_task: asyncio.Task | None = None
 
+        # MQTT creds the user typed before we discovered the device was
+        # legacy. Replayed automatically once the post-flash device
+        # exposes /provision, so the user doesn't re-enter them.
+        self._pending_mqtt_creds: dict[str, str] | None = None
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -150,6 +155,14 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         await self.async_set_unique_id(name)
         self._abort_if_unique_id_configured()
 
+        # If the integration already has a live record of this device
+        # (it's published its config payload to MQTT and the hub picked
+        # it up), don't show a fresh "Discovered" card. Re-broadcasts of
+        # mDNS are normal and shouldn't pester the user.
+        if _is_device_adopted(self.hass, name):
+            _LOGGER.info("Device %s already adopted, dismissing rediscovery", name)
+            return self.async_abort(reason="already_configured")
+
         self._zeroconf_info = discovery_info
         self._device_name = name
         self._device_host = host
@@ -187,12 +200,12 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_flash_legacy(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Confirm host (firmware type is auto-derived from the hostname).
+        """Confirm the user wants to flash the legacy device.
 
-        Asking the user to pick a firmware type was both a security
-        footgun (wrong choice bricks the device) and a UX failure for a
-        flow that already knows what kind of device it's talking to.
-        If we can't guess, abort cleanly rather than guess wrong.
+        We already know the IP (from zeroconf) and the firmware type (from
+        the hostname). The form is just an informational confirmation —
+        no fields to edit. If we can't guess the firmware type, abort
+        rather than risk bricking the device with the wrong binary.
         """
         if not self._flash_firmware_type:
             return self.async_abort(
@@ -203,16 +216,13 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is None:
             return self.async_show_form(
                 step_id="flash_legacy",
-                data_schema=vol.Schema(
-                    {vol.Required("host", default=self._flash_host or ""): str}
-                ),
+                data_schema=vol.Schema({}),
                 description_placeholders={
                     "name": self._device_name or "",
                     "firmware_type": self._flash_firmware_type,
                 },
             )
 
-        self._flash_host = user_input["host"].strip()
         self._flash_task = None
         self._flash_error = None
         return await self.async_step_flash_progress()
@@ -266,6 +276,9 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
                 step_id="post_flash_wait",
                 progress_action="waiting_for_reboot",
                 progress_task=self._post_flash_task,
+                description_placeholders={
+                    "name": self._device_name or "device"
+                },
             )
 
         came_back = bool(self._post_flash_task.result())
@@ -297,7 +310,7 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> bool:
         """Poll http://<host>/provision until it answers (or timeout).
 
-        Reuses the same response-code rule as _device_supports_provisioning.
+        Reuses the POST-based probe so it matches `_device_supports_provisioning`.
         2s sleep between attempts; the first 15-20s typically yield
         connection refused (boot in progress), then a normal HTTP
         response once WiFi is up and the web server is listening.
@@ -307,14 +320,9 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
         session = async_get_clientsession(self.hass)
-        url = f"http://{host}/provision"
         while loop.time() < deadline:
-            try:
-                async with session.get(url, timeout=3, allow_redirects=False) as resp:
-                    if resp.status in (200, 204, 400, 405):
-                        return True
-            except Exception:  # noqa: BLE001
-                pass
+            if await _probe_provision_endpoint(session, host):
+                return True
             await asyncio.sleep(2)
         return False
 
@@ -329,19 +337,18 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
     async def _device_supports_provisioning(self, host: str) -> bool:
         """Probe the device's HTTP /provision endpoint.
 
-        New firmware's /provision accepts POST; a GET typically returns 200,
-        204, 400 (bad request) or 405 (method not allowed). Legacy firmware
-        without the endpoint returns 404, or ESPHome's default web_server
-        can return 500 for unhandled routes. Treat anything outside the known
-        new-firmware response set as legacy.
+        Uses POST because some firmware revisions only register the route
+        for POST and close the connection on other methods (the original
+        GET-based probe got false negatives against post-OTA firmware).
+
+        Detection rule: ESPHome's default web_server returns HTTP 500 with
+        an empty body for unhandled routes. Anything else — including 411
+        (length required), 400, 200, even a connection error after the
+        request was sent — proves the route is registered.
         """
-        url = f"http://{host}/provision"
-        try:
-            session = async_get_clientsession(self.hass)
-            async with session.get(url, timeout=5, allow_redirects=False) as resp:
-                return resp.status in (200, 204, 400, 405)
-        except Exception:  # noqa: BLE001
-            return False
+        return await _probe_provision_endpoint(
+            async_get_clientsession(self.hass), host
+        )
 
     async def _show_zeroconf_mqtt_form(
         self, errors: dict[str, str] | None = None
@@ -374,6 +381,12 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle MQTT credential submission for mDNS-discovered device."""
         if user_input is None:
+            # Post-flash re-entry: replay the creds the user already
+            # typed before we routed them through the legacy flash.
+            if self._pending_mqtt_creds is not None:
+                creds = self._pending_mqtt_creds
+                self._pending_mqtt_creds = None
+                return await self.async_step_zeroconf_confirm(creds)
             return await self._show_zeroconf_mqtt_form()
 
         broker = user_input.get("mqtt_broker", "").strip()
@@ -386,20 +399,40 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
             )
 
         # Send MQTT credentials via HTTP POST to the device
-        success = await self._provision_via_http(
+        success, looks_legacy = await self._provision_via_http(
             self._device_host, broker, username, password
         )
-        if not success:
-            return await self._show_zeroconf_mqtt_form(
-                errors={"base": "http_provision_failed"}
-            )
+        if success:
+            return await self.async_step_await_mqtt()
 
-        return await self.async_step_await_mqtt()
+        # Legacy firmware (no /provision handler) → offer an in-flow
+        # update. We need a guessed firmware type to know which bin to
+        # download; without one we can't safely flash, so fall through
+        # to the generic error.
+        if looks_legacy and self._flash_firmware_type:
+            self._pending_mqtt_creds = {
+                "mqtt_broker": broker,
+                "mqtt_username": username,
+                "mqtt_password": password,
+            }
+            self._flash_task = None
+            self._flash_error = None
+            return await self.async_step_flash_legacy()
+
+        return await self._show_zeroconf_mqtt_form(
+            errors={"base": "http_provision_failed"}
+        )
 
     async def _provision_via_http(
         self, host: str, broker: str, username: str, password: str
-    ) -> bool:
-        """Send MQTT credentials to the device via HTTP POST (form-encoded)."""
+    ) -> tuple[bool, bool]:
+        """Send MQTT credentials to the device via HTTP POST.
+
+        Returns (success, looks_legacy). looks_legacy is True when the response
+        pattern matches a device whose firmware lacks the /provision handler:
+        ESPHome's default web_server returns 500 with empty body for unhandled
+        POST routes, while new firmware returns 200 (ok) or 400 ({"error":...}).
+        """
         url = f"http://{host}/provision"
         form_data = {
             "broker": broker,
@@ -411,14 +444,14 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
             async with session.post(url, data=form_data, timeout=10) as resp:
                 if resp.status == 200:
                     _LOGGER.info("MQTT credentials sent to %s via HTTP", host)
-                    return True
-                _LOGGER.error(
-                    "HTTP provision failed: %s %s", resp.status, await resp.text()
-                )
-                return False
+                    return True, False
+                body = await resp.text()
+                _LOGGER.error("HTTP provision failed: %s %s", resp.status, body)
+                looks_legacy = resp.status == 500 and not body.strip()
+                return False, looks_legacy
         except Exception:
             _LOGGER.exception("Failed to send MQTT config to %s via HTTP", host)
-            return False
+            return False, False
 
     async def _check_device_on_mqtt_by_name(self, device_name: str) -> bool:
         """Check if a device with the given name is already publishing on MQTT."""
@@ -769,29 +802,64 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     async def _wait_for_mqtt_confirmation(self, timeout: int = 60) -> bool:
-        """Subscribe to MQTT and wait for the device's config message."""
-        if "mqtt" not in self.hass.config.components or not self._discovery_info:
+        """Subscribe to MQTT and wait for the device's config message.
+
+        Matches on three independent signals so it works regardless of how
+        the device announced itself before reaching MQTT:
+          1. Exact `device_id` match (zeroconf devices already on new firmware).
+          2. Full WiFi MAC match (BLE flows — derived from BLE MAC).
+          3. MAC-suffix match (legacy device that was just flashed: hostname
+             changed from e.g. `resistive_sensor-4a0afc` to
+             `smartvanio-res-4a0afc`, but the trailing MAC suffix is stable).
+        """
+        if "mqtt" not in self.hass.config.components:
             return False
 
         from homeassistant.components.mqtt import async_subscribe
 
-        ble_mac = self._discovery_info.address.upper().replace("-", ":")
-        mac_parts = ble_mac.split(":")
-        wifi_last_octet = int(mac_parts[-1], 16) - 2
-        if wifi_last_octet < 0:
-            wifi_last_octet += 256
-        expected_wifi_mac = ":".join(mac_parts[:-1] + [f"{wifi_last_octet:02X}"])
+        expected_device_id: str | None = self._device_name
+        expected_wifi_mac: str | None = None
+        expected_mac_suffix: str | None = None
+
+        if self._device_name and "-" in self._device_name:
+            tail = self._device_name.rsplit("-", 1)[-1].lower()
+            # Hostnames carry the last 3 octets of the MAC (6 hex chars).
+            if len(tail) == 6 and all(c in "0123456789abcdef" for c in tail):
+                expected_mac_suffix = tail
+
+        if self._discovery_info is not None:
+            ble_mac = self._discovery_info.address.upper().replace("-", ":")
+            mac_parts = ble_mac.split(":")
+            wifi_last_octet = int(mac_parts[-1], 16) - 2
+            if wifi_last_octet < 0:
+                wifi_last_octet += 256
+            expected_wifi_mac = ":".join(
+                mac_parts[:-1] + [f"{wifi_last_octet:02X}"]
+            )
+
+        if not (expected_device_id or expected_wifi_mac or expected_mac_suffix):
+            return False
 
         found = asyncio.Event()
 
         def _on_message(msg):
             try:
                 payload = json.loads(msg.payload)
-                device_mac = payload.get("mac", "").upper().replace("-", ":")
-                if device_mac == expected_wifi_mac:
+            except (json.JSONDecodeError, ValueError):
+                return
+            if expected_device_id and payload.get("device_id") == expected_device_id:
+                found.set()
+                return
+            raw_mac = (payload.get("mac") or "").lower()
+            if expected_wifi_mac:
+                normalized = raw_mac.replace("-", ":").upper()
+                if normalized == expected_wifi_mac:
                     found.set()
-            except (json.JSONDecodeError, AttributeError):
-                pass
+                    return
+            if expected_mac_suffix:
+                hex_only = raw_mac.replace(":", "").replace("-", "")
+                if hex_only.endswith(expected_mac_suffix):
+                    found.set()
 
         unsub = await async_subscribe(
             self.hass, f"{DEFAULT_MQTT_PREFIX}/+/config", _on_message, qos=0
@@ -900,6 +968,67 @@ def _guess_firmware_type(device_name: str | None) -> str | None:
     return None
 
 
+async def _probe_provision_endpoint(session, host: str) -> bool:
+    """True if http://{host}/provision is registered (i.e. new firmware).
+
+    Sends an empty POST. ESPHome's default web_server returns HTTP 500 with
+    an empty body for unhandled routes; anything else proves the route is
+    registered (e.g. 411 length required, 400 missing fields, 200 ok).
+    """
+    url = f"http://{host}/provision"
+    try:
+        async with session.post(
+            url, data=b"", timeout=5, allow_redirects=False
+        ) as resp:
+            if resp.status != 500:
+                return True
+            body = await resp.text()
+            return bool(body.strip())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _hostname_mac_suffix(name: str) -> str | None:
+    """Extract the trailing 6-hex-char MAC suffix from a device hostname.
+
+    e.g. "resistive_sensor-4a0afc" → "4a0afc"
+         "smartvanio-res-4a0afc"   → "4a0afc"
+         "smartvanio-led-77a5a0"   → "77a5a0"
+    Returns None if no recognisable suffix is present.
+    """
+    if not name or "-" not in name:
+        return None
+    tail = name.rsplit("-", 1)[-1].lower()
+    if len(tail) == 6 and all(c in "0123456789abcdef" for c in tail):
+        return tail
+    return None
+
+
+def _is_device_adopted(hass: HomeAssistant, device_id: str) -> bool:
+    """True if any active hub entry already tracks this device.
+
+    Matches on (1) exact device_id present in `store["devices"]`, or (2) any
+    stored device whose `mac` ends in the same MAC suffix as the queried
+    hostname. (2) is what catches the post-flash rename: the legacy
+    firmware broadcast `resistive_sensor-4a0afc`, the new firmware broadcasts
+    `smartvanio-res-4a0afc`, but the trailing 6 hex chars are stable.
+    """
+    suffix = _hostname_mac_suffix(device_id)
+    store_root = hass.data.get(DOMAIN) or {}
+    for entry_store in store_root.values():
+        if not isinstance(entry_store, dict):
+            continue
+        devices = entry_store.get("devices") or {}
+        if device_id in devices:
+            return True
+        if suffix:
+            for cfg in devices.values():
+                mac_hex = (cfg.get("mac") or "").lower().replace(":", "").replace("-", "")
+                if mac_hex.endswith(suffix):
+                    return True
+    return False
+
+
 def _build_bin_url(firmware_type: str, branch: str, filename: str) -> str:
     return (
         f"https://raw.githubusercontent.com/Smartvan-io/"
@@ -971,8 +1100,15 @@ async def _discover_legacy_candidates(
 async def _run_legacy_flash(
     hass: HomeAssistant, host: str, firmware_type: str, branch: str
 ) -> None:
-    """Download firmware from GitHub and push via native ESPHome OTA."""
+    """Download firmware from GitHub and push it to the device.
+
+    Prefers HTTP `/update` (port 80) since legacy firmware ships with
+    `web_server` enabled and the same port is already known to be open
+    (we just spoke to `/provision`). Falls back to native ESPHome OTA on
+    TCP 3232 for builds without web_server.
+    """
     from .ota_native import run_ota as run_native_ota
+    from .ota_http import run_http_ota, has_update_endpoint, HTTPOTAError
 
     fw_url = _build_bin_url(firmware_type, branch, "firmware.bin")
     _LOGGER.info(
@@ -987,8 +1123,24 @@ async def _run_legacy_flash(
             )
         binary = await resp.read()
 
+    if await has_update_endpoint(session, host):
+        _LOGGER.info(
+            "Legacy rescue flash: uploading %d bytes to %s via HTTP /update",
+            len(binary), host,
+        )
+        try:
+            await run_http_ota(session, host, binary)
+            _LOGGER.info("Legacy rescue flash: HTTP upload succeeded for %s", host)
+            return
+        except HTTPOTAError as err:
+            _LOGGER.warning(
+                "Legacy rescue flash: HTTP upload failed for %s (%s) — falling back to native OTA",
+                host, err,
+            )
+
     _LOGGER.info(
-        "Legacy rescue flash: pushing %d bytes to %s via native OTA", len(binary), host
+        "Legacy rescue flash: pushing %d bytes to %s via native OTA (TCP 3232)",
+        len(binary), host,
     )
     await run_native_ota(host, binary)
     _LOGGER.info("Legacy rescue flash: completed successfully for %s", host)

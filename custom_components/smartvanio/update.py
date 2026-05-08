@@ -50,6 +50,7 @@ from .const import (
     FIRMWARE_MANIFEST_FILENAME,
 )
 from .ota_native import run_ota as run_native_ota, OTAError
+from .ota_http import run_http_ota, has_update_endpoint, HTTPOTAError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -412,7 +413,7 @@ class SmartVanUpdate(UpdateEntity):
         )
 
     async def _mqtt_or_native_fallback(self, fw_url: str) -> None:
-        """Wait for MQTT OTA ack; fall back to native OTA if silent."""
+        """Wait for MQTT OTA ack; fall back to HTTP /update or native OTA if silent."""
         try:
             await asyncio.sleep(15)
         except asyncio.CancelledError:
@@ -437,11 +438,11 @@ class SmartVanUpdate(UpdateEntity):
             self._fallback_task = self.hass.async_create_task(_late_timeout())
             return
 
-        # Old firmware — push firmware over native ESPHome OTA.
+        # Old firmware — push firmware to the device directly.
         host = self._device_config.get("ip")
         if not host:
             _LOGGER.error(
-                "Native OTA fallback for %s: no IP in device config — cannot reach device",
+                "OTA fallback for %s: no IP in device config — cannot reach device",
                 self._device_id,
             )
             self._attr_in_progress = False
@@ -450,7 +451,7 @@ class SmartVanUpdate(UpdateEntity):
             return
 
         _LOGGER.info(
-            "MQTT OTA silent after 15s — falling back to native OTA for %s at %s",
+            "MQTT OTA silent after 15s — falling back to direct upload for %s at %s",
             self._device_id, host,
         )
 
@@ -467,7 +468,7 @@ class SmartVanUpdate(UpdateEntity):
             binary = await self._fetch_github_bytes(fw_url)
         except Exception as err:  # noqa: BLE001
             _LOGGER.error(
-                "Native OTA fallback for %s: firmware download failed: %s",
+                "OTA fallback for %s: firmware download failed: %s",
                 self._device_id, err,
             )
             self._attr_in_progress = False
@@ -479,10 +480,26 @@ class SmartVanUpdate(UpdateEntity):
             self._attr_update_percentage = pct
             self.async_write_ha_state()
 
+        # Try HTTP /update first (port 80, works for any build with web_server).
+        session = async_get_clientsession(self.hass)
+        if await has_update_endpoint(session, host):
+            try:
+                await run_http_ota(session, host, binary, progress=_on_progress)
+                self._attr_update_percentage = 100
+                self.async_write_ha_state()
+                _LOGGER.info(
+                    "HTTP OTA for %s succeeded — waiting for device reboot",
+                    self._device_id,
+                )
+                return
+            except HTTPOTAError as err:
+                _LOGGER.warning(
+                    "HTTP OTA for %s failed (%s) — falling back to native OTA",
+                    self._device_id, err,
+                )
+
         try:
             await run_native_ota(host, binary, progress=_on_progress)
-            # Device is rebooting — config-payload listener will pick up the
-            # new version and clear in_progress in _create_update_from_config.
             self._attr_update_percentage = 100
             self.async_write_ha_state()
             _LOGGER.info(

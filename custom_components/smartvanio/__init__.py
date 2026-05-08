@@ -18,6 +18,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
@@ -109,6 +110,25 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
             {"device_id": device_id, "config": payload},
         )
 
+        # Dismiss any zeroconf "Discovered" card whose unique_id matches the
+        # device_id we just registered. This catches the post-flash rename
+        # case: legacy firmware broadcast `resistive_sensor-XXXXXX`, the
+        # adoption flow ran under that unique_id, then the new firmware
+        # broadcasts `smartvanio-res-XXXXXX` and HA spawned a fresh idle
+        # discovery card. We only abort flows still parked at the initial
+        # zeroconf_confirm step — never one the user is mid-flight on.
+        for flow in hass.config_entries.flow.async_progress_by_handler(DOMAIN):
+            flow_unique = (flow.get("context") or {}).get("unique_id")
+            flow_step = flow.get("step_id")
+            if flow_unique == device_id and flow_step == "zeroconf_confirm":
+                _LOGGER.debug(
+                    "Dismissing idle discovery flow %s for already-adopted %s",
+                    flow["flow_id"], device_id,
+                )
+                hass.async_create_task(
+                    hass.config_entries.flow.async_abort(flow["flow_id"])
+                )
+
     try:
         await mqtt.async_subscribe(
             hass, discovery_topic, _handle_discovery, qos=MQTT_QOS
@@ -185,3 +205,38 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if unload_ok:
         hass.data[DOMAIN].pop(entry.entry_id, None)
     return unload_ok
+
+
+async def async_remove_config_entry_device(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+    device_entry: DeviceEntry,
+) -> bool:
+    """Allow the user to delete a SmartVan.io device from the UI.
+
+    Returning True surfaces the trash-can button on the device card. Stale
+    devices (e.g. one reflashed to a different name, or removed from the
+    network) can then be cleaned up without having to remove the whole
+    integration. We also drop the device from our runtime store so a
+    re-discovery on the same device_id starts from a clean slate.
+    """
+    device_ids = {ident[1] for ident in device_entry.identifiers if ident[0] == DOMAIN}
+    store = hass.data.get(DOMAIN, {}).get(config_entry.entry_id)
+    if store:
+        for device_id in device_ids:
+            store.get("devices", {}).pop(device_id, None)
+            store.get("pending_configs", {}).pop(device_id, None)
+            store.get("device_availability", {}).pop(device_id, None)
+
+    # Clear retained MQTT state so the device doesn't immediately
+    # reappear on next HA restart from the broker's retained config.
+    if "mqtt" in hass.config.components:
+        for device_id in device_ids:
+            for suffix in (DISCOVERY_TOPIC_SUFFIX, STATUS_TOPIC_SUFFIX):
+                topic = f"{MQTT_TOPIC_PREFIX}/{device_id}/{suffix}"
+                try:
+                    await mqtt.async_publish(hass, topic, "", qos=MQTT_QOS, retain=True)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.debug("Failed to clear retained topic %s", topic)
+
+    return True
