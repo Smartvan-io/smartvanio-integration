@@ -30,6 +30,10 @@ lovelace:
       type: module
     - url: /local/smartvanio-main-card.js?v=141
       type: module
+    - url: /local/smartvan-io-resistive-sensor.js?v=9
+      type: module
+    - url: /local/smartvan-io-inclinometer.js?v=6
+      type: module
   dashboards:
     smartvan-io:
       mode: yaml

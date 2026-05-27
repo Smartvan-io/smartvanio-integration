@@ -14,6 +14,8 @@ services:
       - ./custom_components/smartvanio:/config/custom_components/smartvanio
       - ../smartvan.io-cards/main-card/index.js:/config/www/smartvanio-main-card.js:ro
       - ../smartvan.io-cards/main-card/kiosk-mode.js:/config/www/kiosk-mode.js:ro
+      - ../smartvan.io-cards/resistive-sensor-card/index.js:/config/www/smartvan-io-resistive-sensor.js:ro
+      - ../smartvan.io-cards/inclinometer-card/index.js:/config/www/smartvan-io-inclinometer.js:ro
       - ./.ha_bootstrap/dashboards:/config/dashboards:ro
       - ./.ha_bootstrap/ui-lovelace.yaml:/config/ui-lovelace.yaml:ro
     entrypoint: /bin/bash
