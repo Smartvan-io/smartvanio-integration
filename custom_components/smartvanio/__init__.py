@@ -42,6 +42,12 @@ type SmartVanConfigEntry = ConfigEntry
 async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> bool:
     """Set up SmartVan.io from a config entry."""
     _LOGGER.info("Setting up SmartVan.io integration")
+    _LOGGER.warning(
+        "SmartVan.io integration is no longer distributed via HACS. "
+        "Please install the SmartVan.io add-on "
+        "(https://github.com/Smartvan-io/smartvan) which manages this "
+        "integration, MQTT, and the dashboard cards automatically."
+    )
 
     # Store runtime data for this integration
     hass.data.setdefault(DOMAIN, {})
