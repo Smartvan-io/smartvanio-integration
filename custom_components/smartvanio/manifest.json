@@ -9,7 +9,7 @@
   "integration_type": "hub",
   "iot_class": "local_push",
   "requirements": ["bleak>=0.21.0"],
-  "version": "3.0.1",
+  "version": "3.0.2",
   "bluetooth": [
     {
       "service_uuid": "5ac30000-5c6b-4a6e-9a25-736f6e696f00"

@@ -17,6 +17,7 @@ from typing import Any
 from homeassistant.components import mqtt
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -98,6 +99,8 @@ class SmartVanSelect(SelectEntity):
         self._attr_options = entity_config.get("options", [])
         self._attr_current_option = self._attr_options[0] if self._attr_options else None
         self._attr_available = True
+        if entity_config.get("entity_category") == "config":
+            self._attr_entity_category = EntityCategory.CONFIG
 
         self._state_topic = f"{device_id}/select/{channel}/state"
         self._command_topic = f"{device_id}/select/{channel}/command"

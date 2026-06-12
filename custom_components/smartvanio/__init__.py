@@ -123,17 +123,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
         # broadcasts `smartvanio-res-XXXXXX` and HA spawned a fresh idle
         # discovery card. We only abort flows still parked at the initial
         # zeroconf_confirm step — never one the user is mid-flight on.
-        for flow in hass.config_entries.flow.async_progress_by_handler(DOMAIN):
-            flow_unique = (flow.get("context") or {}).get("unique_id")
-            flow_step = flow.get("step_id")
-            if flow_unique == device_id and flow_step == "zeroconf_confirm":
-                _LOGGER.debug(
-                    "Dismissing idle discovery flow %s for already-adopted %s",
-                    flow["flow_id"], device_id,
-                )
-                hass.async_create_task(
-                    hass.config_entries.flow.async_abort(flow["flow_id"])
-                )
+        # Collect first, then abort — async_abort() is a synchronous callback
+        # that mutates the in-progress flow set, so aborting while iterating
+        # async_progress_by_handler() would change the set mid-iteration.
+        stale_flow_ids = [
+            flow["flow_id"]
+            for flow in hass.config_entries.flow.async_progress_by_handler(DOMAIN)
+            if (flow.get("context") or {}).get("unique_id") == device_id
+            and flow.get("step_id") == "zeroconf_confirm"
+        ]
+        for flow_id in stale_flow_ids:
+            _LOGGER.debug(
+                "Dismissing idle discovery flow %s for already-adopted %s",
+                flow_id, device_id,
+            )
+            hass.config_entries.flow.async_abort(flow_id)
 
     try:
         await mqtt.async_subscribe(

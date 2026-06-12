@@ -421,6 +421,7 @@ class SmartVanLight(LightEntity, RestoreEntity):
                 payload: dict[str, Any] = {
                     "state": "ON",
                     "brightness": kwargs[ATTR_BRIGHTNESS],
+                    "transition": kwargs.get("transition", 0),
                 }
                 await mqtt.async_publish(
                     self.hass, self._command_topic,
@@ -477,11 +478,13 @@ class SmartVanLight(LightEntity, RestoreEntity):
             r, g, b = kwargs[ATTR_RGB_COLOR]
             payload["color"] = {"r": r, "g": g, "b": b}
             self._attr_rgb_color = (r, g, b)
-        # Smooth transition for brightness/color changes
+        # Snap brightness/color by default. ESPHome's MQTT light defaults to a
+        # 1s fade which makes WS2811 strips visibly flicker through the low-PWM
+        # region during the ramp. Caller can still pass an explicit transition.
         if "transition" in kwargs:
             payload["transition"] = kwargs["transition"]
-        elif ATTR_BRIGHTNESS in kwargs and ATTR_RGB_COLOR not in kwargs:
-            payload["transition"] = 1
+        else:
+            payload["transition"] = 0
         # Tell firmware to clear any active effect (Pattern/Segments)
         if ATTR_RGB_COLOR in kwargs or ATTR_EFFECT in kwargs:
             payload["effect"] = "None"

@@ -86,8 +86,17 @@ class SmartVanNumber(NumberEntity):
 
         self._attr_unique_id = f"{device_id}_{channel}"
         self._attr_name = entity_config.get("name", f"Number {channel}")
-        self._attr_native_min_value = entity_config.get("min", -90)
-        self._attr_native_max_value = entity_config.get("max", 90)
+        # Only constrain the range when the device explicitly supplies bounds.
+        # Never fall back to a hardcoded range here: a generic default (e.g. the
+        # inclinometer's -90..90) silently clamps unrelated entities such as the
+        # resistive sensor's 0..15000 Ω numbers. If unset, HA's NumberEntity
+        # default (0..100) applies, but well-behaved firmware always sends min/max.
+        min_val = entity_config.get("min")
+        max_val = entity_config.get("max")
+        if min_val is not None:
+            self._attr_native_min_value = min_val
+        if max_val is not None:
+            self._attr_native_max_value = max_val
         self._attr_native_step = entity_config.get("step", 0.1)
         self._attr_native_unit_of_measurement = entity_config.get("unit")
         self._attr_native_value = entity_config.get("min", 0)

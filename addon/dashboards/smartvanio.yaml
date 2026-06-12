@@ -1,5 +1,10 @@
 title: SmartVan.io
 
+kiosk_mode:
+  kiosk: true
+  hide_sidebar: true
+  hide_header: true
+
 views:
   - title: Dashboard
     path: default

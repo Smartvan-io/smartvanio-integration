@@ -1,8 +1,10 @@
 title: SmartVan.io
 
 kiosk_mode:
+  kiosk: true
   hide_sidebar: true
   hide_header: true
+  debug: true
 
 views:
   - title: Dashboard
