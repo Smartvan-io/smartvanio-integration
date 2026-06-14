@@ -690,12 +690,15 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         self, errors: dict[str, str] | None = None
     ) -> ConfigFlowResult:
         """Show form with WiFi + MQTT fields (device needs full provisioning)."""
-        default_ssid = ""
-        existing = self.hass.config_entries.async_entries(DOMAIN)
-        if existing:
-            saved_ssid = existing[0].data.get("wifi_ssid", "")
-            if saved_ssid:
-                default_ssid = saved_ssid
+        # Prefer the SSID the user just entered (preserved across a failed
+        # attempt) so a retry doesn't start from a blank form.
+        default_ssid = self._pending_wifi_ssid or ""
+        if not default_ssid:
+            existing = self.hass.config_entries.async_entries(DOMAIN)
+            if existing:
+                saved_ssid = existing[0].data.get("wifi_ssid", "")
+                if saved_ssid:
+                    default_ssid = saved_ssid
 
         mqtt_creds = self._get_mqtt_credentials()
         default_broker = mqtt_creds["broker"]
@@ -793,12 +796,16 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
                 extra["wifi_ssid"] = self._pending_wifi_ssid
             return self._create_or_update_entry(extra or None)
 
-        # Device didn't appear — show error with retry
-        return self.async_show_form(
-            step_id="await_mqtt",
-            data_schema=vol.Schema({}),
-            errors={"base": "device_not_responding"},
-            description_placeholders={"name": self._device_name},
+        # Device didn't appear in time — go straight back to the entry form
+        # with an actionable error (instead of a dead-end empty screen). The
+        # WiFi SSID the user just typed is preserved via _pending_wifi_ssid so
+        # they only need to re-enter the password.
+        if self._device_on_wifi:
+            return await self._show_mqtt_only_form(
+                errors={"base": "device_not_responding"}
+            )
+        return await self._show_full_form(
+            errors={"base": "device_not_responding"}
         )
 
     async def _wait_for_mqtt_confirmation(self, timeout: int = 60) -> bool:
@@ -903,11 +910,20 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         username: str,
         password: str,
     ) -> bool:
-        """Write WiFi + MQTT credentials to the device over BLE GATT."""
+        """Write WiFi + MQTT credentials to the device over BLE GATT.
+
+        BlueZ sometimes hands back a stale or incomplete cached GATT table on
+        the first connect, so the provisioning characteristic looks missing and
+        the write raises BleakCharacteristicNotFoundError. When that happens we
+        clear the device's GATT cache and reconnect, which forces a fresh
+        service discovery — this is what makes provisioning reliable after the
+        device has rebooted (its GATT handles change between boots).
+        """
         if self._discovery_info is None:
             return False
 
         from bleak import BleakClient
+        from bleak.exc import BleakCharacteristicNotFoundError
 
         payload = json.dumps(
             {
@@ -920,22 +936,46 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
             separators=(",", ":"),
         ).encode("utf-8")
 
-        try:
-            async with BleakClient(self._discovery_info.device) as client:
-                await client.write_gatt_char(
-                    BLE_MQTT_CONFIG_CHAR_UUID, payload, response=True
+        address = self._discovery_info.address
+        for attempt in range(3):
+            try:
+                async with BleakClient(self._discovery_info.device) as client:
+                    char = client.services.get_characteristic(
+                        BLE_MQTT_CONFIG_CHAR_UUID
+                    )
+                    if char is None:
+                        # Stale/incomplete cached GATT — drop it and reconnect
+                        # so the next attempt does a fresh service discovery.
+                        _LOGGER.warning(
+                            "Provisioning characteristic %s not found on %s "
+                            "(attempt %d/3) — clearing GATT cache and retrying",
+                            BLE_MQTT_CONFIG_CHAR_UUID, address, attempt + 1,
+                        )
+                        try:
+                            await client.clear_cache()
+                        except Exception:  # noqa: BLE001 - backend may lack it
+                            _LOGGER.debug(
+                                "clear_cache() unavailable for %s", address
+                            )
+                        continue
+                    await client.write_gatt_char(char, payload, response=True)
+                    _LOGGER.info("Credentials sent to %s via BLE", address)
+                    return True
+            except BleakCharacteristicNotFoundError:
+                _LOGGER.warning(
+                    "BLE characteristic missing on %s (attempt %d/3) — retrying",
+                    address, attempt + 1,
                 )
-                _LOGGER.info(
-                    "MQTT credentials sent to %s via BLE",
-                    self._discovery_info.address,
-                )
-                return True
-        except Exception:
-            _LOGGER.exception(
-                "Failed to write MQTT config to %s",
-                self._discovery_info.address,
-            )
-            return False
+                continue
+            except Exception:
+                _LOGGER.exception("Failed to write BLE config to %s", address)
+                return False
+
+        _LOGGER.error(
+            "Could not access the provisioning characteristic on %s after 3 "
+            "attempts (stale GATT cache?)", address,
+        )
+        return False
 
 
 FIRMWARE_TYPES = [

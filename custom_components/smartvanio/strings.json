@@ -73,9 +73,9 @@
       "unknown": "An unexpected error occurred.",
       "ssid_required": "WiFi network name is required.",
       "broker_required": "MQTT broker address is required.",
-      "ble_write_failed": "Failed to send credentials to the device via Bluetooth. Make sure the device is nearby and try again.",
+      "ble_write_failed": "Couldn't send the settings to the device over Bluetooth. Make sure it's powered on and nearby. If it just rebooted, wait about 15 seconds and try again.",
       "http_provision_failed": "Failed to send MQTT credentials to the device over WiFi. Check that the device is reachable and try again.",
-      "device_not_responding": "The device did not connect to MQTT. Check your WiFi and MQTT credentials and try again."
+      "device_not_responding": "The device didn't come online within 60 seconds. Its WiFi and MQTT details were sent, but it never connected. Check that the WiFi password is correct and the network is 2.4 GHz (these devices can't use 5 GHz). Your WiFi network name is kept below — re-enter the WiFi password and try again. If it still won't connect, factory-reset the device (hold its button about 10 seconds) and retry."
     },
     "abort": {
       "already_configured": "This device is already configured.",
