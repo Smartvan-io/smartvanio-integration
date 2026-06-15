@@ -510,11 +510,30 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
 
         self._discovery_info = discovery_info
-        self._device_name = discovery_info.name or "SmartVan.io Device"
+        self._device_name = self._friendly_ble_name(discovery_info)
 
         # Show the discovery confirmation to the user
         self.context["title_placeholders"] = {"name": self._device_name}
         return await self.async_step_bluetooth_confirm()
+
+    def _friendly_ble_name(self, discovery_info: BluetoothServiceInfoBleak) -> str:
+        """Best-effort display name for a BLE-discovered device.
+
+        HA reports the MAC address as the device "name" when it didn't capture
+        the advertised local name — SmartVan devices carry their name in the
+        BLE scan response (no room beside the 128-bit service UUID in the
+        primary advert), which passive scanning on the host adapter misses. In
+        that case fall back to a label built from the WiFi-MAC suffix so the
+        discovery card reads e.g. "SmartVan.io device (331070)" rather than a
+        raw MAC. When HA *does* have the real name (active scan / BT proxy), we
+        use it — it includes the device type, e.g. "smartvanio-in-331070".
+        """
+        name = (discovery_info.name or "").strip()
+        addr_norm = discovery_info.address.replace(":", "").replace("-", "").lower()
+        if name and name.replace(":", "").replace("-", "").lower() != addr_norm:
+            return name
+        suffix = self._ble_mac_to_wifi_suffix()
+        return f"SmartVan.io device ({suffix})" if suffix else "SmartVan.io device"
 
     def _get_mqtt_credentials(self) -> dict[str, str]:
         """Read broker/username/password from the existing MQTT config entry."""
