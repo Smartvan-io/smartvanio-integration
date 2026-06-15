@@ -125,5 +125,18 @@
       "flash_failed": "Firmware flash failed: {error}",
       "no_legacy_devices_found": "No SmartVan.io devices were found on the network via mDNS. Make sure the device is powered on and connected to the same WiFi as Home Assistant."
     }
+  },
+  "issues": {
+    "device_offline_reprovision": {
+      "title": "{name} needs to be set up again",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "Re-provision {name}",
+            "description": "{name} is offline and waiting in Bluetooth setup mode — it likely lost its WiFi connection or was factory reset. Make sure the device is powered on and within Bluetooth range of Home Assistant, then submit. It will reappear as a discovered device where you can re-enter its WiFi and MQTT details (no need to delete it)."
+          }
+        }
+      }
+    }
   }
 }

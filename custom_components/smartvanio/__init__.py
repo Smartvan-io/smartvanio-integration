@@ -13,11 +13,16 @@ import time
 from datetime import timedelta
 from typing import Any
 
-from homeassistant.components import mqtt
+from homeassistant.components import bluetooth, mqtt
+from homeassistant.components.bluetooth import (
+    BluetoothCallbackMatcher,
+    BluetoothScanningMode,
+)
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.device_registry import DeviceEntry
 from homeassistant.helpers.event import async_track_time_interval
 
@@ -30,9 +35,32 @@ from .const import (
     DISCOVERY_TOPIC_SUFFIX,
     STATUS_TOPIC_SUFFIX,
     ENTITY_TYPE_LIGHT,
+    BLE_SERVICE_UUID,
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def reprovision_issue_id(device_id: str) -> str:
+    """Repair-issue id for a device that needs re-provisioning."""
+    return f"reprovision_{device_id}"
+
+
+def _wifi_suffix_from_ble_mac(ble_mac: str) -> str | None:
+    """Map a device's BLE MAC to its WiFi MAC suffix.
+
+    ESP32 BLE MAC = WiFi MAC + 2 on the last octet. Device ids end in the
+    last 3 octets of the WiFi MAC (e.g. ...-77a5a0), so this lets us match a
+    BLE advertisement back to an already-registered device_id.
+    """
+    try:
+        parts = ble_mac.upper().replace("-", ":").split(":")
+        last = int(parts[-1], 16) - 2
+        if last < 0:
+            last += 256
+        return (parts[-3] + parts[-2] + f"{last:02X}").lower()
+    except (ValueError, IndexError):
+        return None
 
 # Store discovered devices and their config payloads
 # Keyed by device_id
@@ -97,6 +125,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
         store = hass.data[DOMAIN][entry.entry_id]
         store["devices"][device_id] = payload
         store["pending_configs"][device_id] = payload
+
+        # Publishing config means the device is online and provisioned, so
+        # clear any "needs re-provisioning" repair we may have raised for it.
+        ir.async_delete_issue(hass, DOMAIN, reprovision_issue_id(device_id))
 
         # Refresh heartbeat — config messages prove the device is alive
         avail = store["device_availability"]
@@ -169,6 +201,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
             prev = availability.get(device_id, {}).get("available")
             availability[device_id] = {"available": is_online, "last_seen": now}
 
+            if is_online:
+                ir.async_delete_issue(
+                    hass, DOMAIN, reprovision_issue_id(device_id)
+                )
+
             if prev != is_online:
                 _LOGGER.debug("Device %s availability: %s", device_id, is_online)
                 hass.bus.async_fire(
@@ -202,11 +239,74 @@ async def async_setup_entry(hass: HomeAssistant, entry: SmartVanConfigEntry) -> 
         async_track_time_interval(hass, _check_heartbeats, timedelta(seconds=30))
     )
 
+    # Watch for known-but-offline devices that have dropped back into BLE
+    # setup mode (factory reset, WiFi/router change) and raise a Repair so the
+    # user can re-provision them without deleting the device.
+    _setup_reprovision_watch(hass, entry)
+
     # Forward setup to platforms (light, switch, sensor, etc.)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     _LOGGER.info("SmartVan.io integration setup complete")
     return True
+
+
+@callback
+def _setup_reprovision_watch(hass: HomeAssistant, entry: SmartVanConfigEntry) -> None:
+    """Raise a Repair when a known, offline device re-enters BLE setup mode.
+
+    A SmartVan.io device always advertises its provisioning service over BLE.
+    If we see a device whose BLE MAC maps to an already-registered device that
+    is currently MQTT-offline, it has lost its connection (factory reset, WiFi
+    change, etc.) and is waiting to be set up again — surface that to the user.
+    """
+    store = hass.data[DOMAIN][entry.entry_id]
+    store["ble_adverts"] = {}
+
+    @callback
+    def _on_advert(service_info, change) -> None:
+        suffix = _wifi_suffix_from_ble_mac(service_info.address)
+        if not suffix:
+            return
+        device_id = next(
+            (d for d in store["devices"] if d.lower().endswith(suffix)), None
+        )
+        if device_id is None:
+            return  # not a device we know about — leave to normal discovery
+        if store["device_availability"].get(device_id, {}).get("available"):
+            return  # online — nothing wrong
+        # Known + offline + advertising setup service → needs re-provisioning.
+        store["ble_adverts"][device_id] = service_info.address
+        name = store["devices"].get(device_id, {}).get("name", device_id)
+        ir.async_create_issue(
+            hass,
+            DOMAIN,
+            reprovision_issue_id(device_id),
+            is_fixable=True,
+            severity=ir.IssueSeverity.WARNING,
+            translation_key="device_offline_reprovision",
+            translation_placeholders={"name": name},
+            data={
+                "device_id": device_id,
+                "entry_id": entry.entry_id,
+                "ble_address": service_info.address,
+                "name": name,
+            },
+        )
+
+    try:
+        entry.async_on_unload(
+            bluetooth.async_register_callback(
+                hass,
+                _on_advert,
+                BluetoothCallbackMatcher(
+                    service_uuid=BLE_SERVICE_UUID, connectable=True
+                ),
+                BluetoothScanningMode.ACTIVE,
+            )
+        )
+    except Exception:  # noqa: BLE001 - bluetooth may be unavailable on this host
+        _LOGGER.debug("Bluetooth unavailable — re-provision watch not registered")
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -237,6 +337,10 @@ async def async_remove_config_entry_device(
             store.get("devices", {}).pop(device_id, None)
             store.get("pending_configs", {}).pop(device_id, None)
             store.get("device_availability", {}).pop(device_id, None)
+            store.get("ble_adverts", {}).pop(device_id, None)
+
+    for device_id in device_ids:
+        ir.async_delete_issue(hass, DOMAIN, reprovision_issue_id(device_id))
 
     # Clear retained MQTT state so the device doesn't immediately
     # reappear on next HA restart from the broker's retained config.
