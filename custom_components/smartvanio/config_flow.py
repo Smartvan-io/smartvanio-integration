@@ -26,6 +26,7 @@ from .const import (
     DEFAULT_BETA_CHANNEL,
     BLE_SERVICE_UUID,
     BLE_MQTT_CONFIG_CHAR_UUID,
+    STATUS_TOPIC_SUFFIX,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -453,33 +454,44 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
             _LOGGER.exception("Failed to send MQTT config to %s via HTTP", host)
             return False, False
 
-    async def _check_device_on_mqtt_by_name(self, device_name: str) -> bool:
-        """Check if a device with the given name is already publishing on MQTT."""
-        if "mqtt" not in self.hass.config.components:
+    async def _mqtt_status_online(self, device_id: str | None) -> bool:
+        """True only if {prefix}/{device_id}/status currently reads "online".
+
+        The status topic is backed by the device's MQTT last-will, so it
+        reflects live connection state. The *config* topic must not be used for
+        this — it's retained, so it lingers on the broker after a device goes
+        offline (factory reset, power loss) and would make us treat a dead
+        device as still provisioned, skipping re-provisioning.
+        """
+        if not device_id or "mqtt" not in self.hass.config.components:
             return False
 
         from homeassistant.components.mqtt import async_subscribe
 
-        found = asyncio.Event()
+        statuses: dict[str, bool] = {}
 
-        def _on_message(msg):
-            try:
-                payload = json.loads(msg.payload)
-                if payload.get("device_id") == device_name:
-                    found.set()
-            except (json.JSONDecodeError, AttributeError):
-                pass
+        def _on_status(msg):
+            parts = msg.topic.split("/")
+            if len(parts) >= 2:
+                try:
+                    statuses[parts[1]] = (
+                        json.loads(msg.payload).get("state") == "online"
+                    )
+                except (json.JSONDecodeError, AttributeError):
+                    pass
 
         unsub = await async_subscribe(
-            self.hass, f"{DEFAULT_MQTT_PREFIX}/+/config", _on_message, qos=0
+            self.hass, f"{DEFAULT_MQTT_PREFIX}/+/{STATUS_TOPIC_SUFFIX}", _on_status, qos=0
         )
         try:
-            await asyncio.wait_for(found.wait(), timeout=5.0)
-            return True
-        except asyncio.TimeoutError:
-            return False
+            await asyncio.sleep(2.5)  # let the retained status message arrive
+            return statuses.get(device_id, False)
         finally:
             unsub()
+
+    async def _check_device_on_mqtt_by_name(self, device_name: str) -> bool:
+        """True only if a device with this id is currently online via MQTT."""
+        return await self._mqtt_status_online(device_name)
 
     # ── Bluetooth discovery ─────────────────────────────────────
 
@@ -568,7 +580,12 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
             return False
 
     async def _check_device_on_mqtt(self) -> bool:
-        """Check if the discovered BLE device is already online via MQTT."""
+        """True only if the discovered BLE device is currently ONLINE via MQTT.
+
+        Maps the BLE MAC to the device_id via the (retained) config message,
+        then confirms liveness through the LWT-backed status topic — never the
+        retained config alone, which persists after a device goes offline.
+        """
         if "mqtt" not in self.hass.config.components or not self._discovery_info:
             return False
 
@@ -576,36 +593,33 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
 
         ble_mac = self._discovery_info.address.upper().replace("-", ":")
         # ESP32 BLE MAC = WiFi MAC + 2 (last octet)
-        # Convert BLE MAC to expected WiFi MAC for matching
         mac_parts = ble_mac.split(":")
         wifi_last_octet = int(mac_parts[-1], 16) - 2
         if wifi_last_octet < 0:
             wifi_last_octet += 256
         expected_wifi_mac = ":".join(mac_parts[:-1] + [f"{wifi_last_octet:02X}"])
 
-        found = asyncio.Event()
+        device_id: dict[str, str | None] = {"id": None}
 
-        def _on_message(msg):
+        def _on_config(msg):
             try:
                 payload = json.loads(msg.payload)
-                device_mac = payload.get("mac", "").upper().replace("-", ":")
-                if device_mac == expected_wifi_mac:
-                    found.set()
             except (json.JSONDecodeError, AttributeError):
-                pass
+                return
+            device_mac = (payload.get("mac") or "").upper().replace("-", ":")
+            if device_mac == expected_wifi_mac:
+                device_id["id"] = payload.get("device_id")
 
         unsub = await async_subscribe(
-            self.hass, f"{DEFAULT_MQTT_PREFIX}/+/config", _on_message, qos=0
+            self.hass, f"{DEFAULT_MQTT_PREFIX}/+/config", _on_config, qos=0
         )
         try:
-            # Wait up to 5s for a matching config message (published every 30s,
-            # but retained messages arrive immediately)
-            await asyncio.wait_for(found.wait(), timeout=5.0)
-            return True
-        except asyncio.TimeoutError:
-            return False
+            await asyncio.sleep(1.5)  # learn device_id from the (retained) config
         finally:
             unsub()
+
+        # Liveness is decided by the status topic, not the retained config.
+        return await self._mqtt_status_online(device_id["id"])
 
     def _create_or_update_entry(
         self, extra_data: dict | None = None
