@@ -1093,10 +1093,19 @@ def _build_bin_url(firmware_type: str, branch: str, filename: str) -> str:
 async def _discover_legacy_candidates(
     hass: HomeAssistant,
 ) -> list[dict[str, str]]:
-    """Browse mDNS for `_smartvaniolib._tcp` and return device candidates.
+    """Browse mDNS for SmartVan.io devices that can be (re)flashed.
 
-    Each candidate is {name, host, firmware_type}. Firmware type is derived
-    from the hostname, falling back to None if it can't be guessed.
+    Browses two service types:
+      - `_smartvaniolib._tcp` — newer SmartVan firmware (custom mDNS).
+      - `_esphomelib._tcp`    — legacy/pre-MQTT firmware still on the stock
+        ESPHome mDNS (i.e. adopted by the ESPHome integration). These are the
+        devices that most need migrating.
+
+    For the generic ESPHome service we only keep hosts whose name looks like a
+    SmartVan device (firmware type guessable from the hostname), so unrelated
+    ESPHome nodes — HA Voice, etc. — don't show up in the list.
+
+    Each candidate is {name, host, firmware_type}.
     """
 
     def _blocking_browse() -> list[dict[str, str]]:
@@ -1107,39 +1116,56 @@ async def _discover_legacy_candidates(
         results: dict[str, dict[str, str]] = {}
         done = threading.Event()
 
+        def _record(name: str, info, require_smartvan: bool) -> None:
+            host = None
+            for addr in info.addresses or []:
+                try:
+                    host = socket.inet_ntoa(addr)
+                    break
+                except OSError:
+                    continue
+            if not host:
+                return
+            short_name = name.split(".")[0]
+            fw_type = _guess_firmware_type(short_name) or ""
+            # On the generic ESPHome service, skip nodes that aren't ours.
+            if require_smartvan and not fw_type:
+                return
+            results[host] = {
+                "name": short_name,
+                "host": host,
+                "firmware_type": fw_type,
+            }
+
         class Listener:
+            def __init__(self, require_smartvan: bool) -> None:
+                self.require_smartvan = require_smartvan
+
             def add_service(self, zc: "Zeroconf", stype: str, name: str) -> None:
                 try:
                     info = zc.get_service_info(stype, name, timeout=2000)
                 except Exception:
                     return
-                if not info:
-                    return
-                host = None
-                for addr in info.addresses or []:
-                    try:
-                        host = socket.inet_ntoa(addr)
-                        break
-                    except OSError:
-                        continue
-                if not host:
-                    return
-                short_name = name.split(".")[0]
-                results[host] = {
-                    "name": short_name,
-                    "host": host,
-                    "firmware_type": _guess_firmware_type(short_name) or "",
-                }
+                if info:
+                    _record(name, info, self.require_smartvan)
 
             def remove_service(self, zc, stype, name): pass
             def update_service(self, zc, stype, name): pass
 
         zc = Zeroconf()
-        browser = ServiceBrowser(zc, "_smartvaniolib._tcp.local.", Listener())
+        browsers = [
+            ServiceBrowser(
+                zc, "_smartvaniolib._tcp.local.", Listener(require_smartvan=False)
+            ),
+            ServiceBrowser(
+                zc, "_esphomelib._tcp.local.", Listener(require_smartvan=True)
+            ),
+        ]
         try:
-            done.wait(timeout=3.5)
+            done.wait(timeout=4.0)
         finally:
-            browser.cancel()
+            for browser in browsers:
+                browser.cancel()
             zc.close()
 
         return sorted(results.values(), key=lambda x: x["name"])
