@@ -18,7 +18,7 @@
   "requirements": [
     "bleak>=0.21.0"
   ],
-  "version": "3.0.6",
+  "version": "3.0.7",
   "bluetooth": [
     {
       "service_uuid": "5ac30000-5c6b-4a6e-9a25-736f6e696f00"
@@ -27,6 +27,14 @@
   "zeroconf": [
     {
       "type": "_smartvaniolib._tcp.local."
+    },
+    {
+      "type": "_esphomelib._tcp.local.",
+      "name": "inclinometer*"
+    },
+    {
+      "type": "_esphomelib._tcp.local.",
+      "name": "resistive_sensor*"
     }
   ]
 }
