@@ -28,7 +28,7 @@ lovelace:
   resources:
     - url: /local/kiosk-mode.js?v=1
       type: module
-    - url: /local/smartvanio-main-card.js?v=159
+    - url: /local/smartvanio-main-card.js?v=160
       type: module
     - url: /local/smartvan-io-resistive-sensor.js?v=9
       type: module
