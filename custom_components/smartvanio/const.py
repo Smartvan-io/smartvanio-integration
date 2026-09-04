@@ -21,7 +21,7 @@ FIRMWARE_GITHUB_ORG = "Smartvan-io"
 FIRMWARE_MANIFEST_FILENAME = "manifest.json"
 
 # Platforms we support
-PLATFORMS = ["light", "switch", "sensor", "binary_sensor", "number", "select", "button", "event", "update"]
+PLATFORMS = ["light", "switch", "sensor", "binary_sensor", "number", "select", "text", "button", "event", "update"]
 
 # Discovery
 DISCOVERY_TOPIC_SUFFIX = "config"
@@ -34,6 +34,7 @@ ENTITY_TYPE_SENSOR = "sensor"
 ENTITY_TYPE_BINARY_SENSOR = "binary_sensor"
 ENTITY_TYPE_NUMBER = "number"
 ENTITY_TYPE_SELECT = "select"
+ENTITY_TYPE_TEXT = "text"
 ENTITY_TYPE_BUTTON = "button"
 ENTITY_TYPE_EVENT = "event"
 

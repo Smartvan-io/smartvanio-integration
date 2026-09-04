@@ -510,6 +510,21 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
 
         self._discovery_info = discovery_info
+
+        # Same suppression the zeroconf path does: a device already adopted by
+        # the hub shouldn't raise a fresh "Discovered" card. The unique_id check
+        # above can never catch this — it keys on the BLE MAC, whereas adoption
+        # keys on the MQTT prefix (async_step_user) or the mDNS hostname
+        # (async_step_zeroconf), so it never matches and every adopted ESP32
+        # re-prompted forever as it advertised. Match on the WiFi MAC suffix
+        # derived from the BLE address, which is stable across all three paths.
+        if _is_mac_suffix_adopted(self.hass, self._ble_mac_to_wifi_suffix()):
+            _LOGGER.info(
+                "Device %s (%s) already adopted, dismissing BLE rediscovery",
+                discovery_info.name, discovery_info.address,
+            )
+            return self.async_abort(reason="already_configured")
+
         self._device_name = self._friendly_ble_name(discovery_info)
 
         # Show the discovery confirmation to the user
@@ -951,12 +966,20 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         clear the device's GATT cache and reconnect, which forces a fresh
         service discovery — this is what makes provisioning reliable after the
         device has rebooted (its GATT handles change between boots).
+
+        Connections go through bleak_retry_connector.establish_connection()
+        rather than a bare BleakClient: BlueZ frequently fails or times out on
+        the first connect to an ESP32 peripheral, and HA logs an explicit
+        warning when you skip it. A bare connect made provisioning fail with
+        asyncio.TimeoutError on marginal links (~-60 dBm on a Pi's built-in
+        adapter) before a single byte was written.
         """
         if self._discovery_info is None:
             return False
 
         from bleak import BleakClient
         from bleak.exc import BleakCharacteristicNotFoundError
+        from bleak_retry_connector import establish_connection
 
         payload = json.dumps(
             {
@@ -970,30 +993,38 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
         ).encode("utf-8")
 
         address = self._discovery_info.address
+        name_for_logs = self._device_name or address
         for attempt in range(3):
+            client: BleakClient | None = None
             try:
-                async with BleakClient(self._discovery_info.device) as client:
-                    char = client.services.get_characteristic(
-                        BLE_MQTT_CONFIG_CHAR_UUID
+                # establish_connection() retries internally and cooperates with
+                # HA's connection slot accounting; a bare BleakClient() does not.
+                client = await establish_connection(
+                    BleakClient,
+                    self._discovery_info.device,
+                    name_for_logs,
+                )
+                char = client.services.get_characteristic(
+                    BLE_MQTT_CONFIG_CHAR_UUID
+                )
+                if char is None:
+                    # Stale/incomplete cached GATT — drop it and reconnect
+                    # so the next attempt does a fresh service discovery.
+                    _LOGGER.warning(
+                        "Provisioning characteristic %s not found on %s "
+                        "(attempt %d/3) — clearing GATT cache and retrying",
+                        BLE_MQTT_CONFIG_CHAR_UUID, address, attempt + 1,
                     )
-                    if char is None:
-                        # Stale/incomplete cached GATT — drop it and reconnect
-                        # so the next attempt does a fresh service discovery.
-                        _LOGGER.warning(
-                            "Provisioning characteristic %s not found on %s "
-                            "(attempt %d/3) — clearing GATT cache and retrying",
-                            BLE_MQTT_CONFIG_CHAR_UUID, address, attempt + 1,
+                    try:
+                        await client.clear_cache()
+                    except Exception:  # noqa: BLE001 - backend may lack it
+                        _LOGGER.debug(
+                            "clear_cache() unavailable for %s", address
                         )
-                        try:
-                            await client.clear_cache()
-                        except Exception:  # noqa: BLE001 - backend may lack it
-                            _LOGGER.debug(
-                                "clear_cache() unavailable for %s", address
-                            )
-                        continue
-                    await client.write_gatt_char(char, payload, response=True)
-                    _LOGGER.info("Credentials sent to %s via BLE", address)
-                    return True
+                    continue
+                await client.write_gatt_char(char, payload, response=True)
+                _LOGGER.info("Credentials sent to %s via BLE", address)
+                return True
             except BleakCharacteristicNotFoundError:
                 _LOGGER.warning(
                     "BLE characteristic missing on %s (attempt %d/3) — retrying",
@@ -1001,12 +1032,25 @@ class SmartVanConfigFlow(ConfigFlow, domain=DOMAIN):
                 )
                 continue
             except Exception:
-                _LOGGER.exception("Failed to write BLE config to %s", address)
-                return False
+                # Previously this returned False, so a single flaky connect
+                # (TimeoutError from BlueZ) aborted provisioning outright even
+                # though the retry loop existed. Connection failures are
+                # transient — keep trying.
+                _LOGGER.warning(
+                    "BLE connect/write to %s failed (attempt %d/3) — retrying",
+                    address, attempt + 1, exc_info=True,
+                )
+                continue
+            finally:
+                if client is not None:
+                    try:
+                        await client.disconnect()
+                    except Exception:  # noqa: BLE001 - already gone
+                        _LOGGER.debug("Disconnect from %s failed", address)
 
         _LOGGER.error(
-            "Could not access the provisioning characteristic on %s after 3 "
-            "attempts (stale GATT cache?)", address,
+            "Could not provision %s over BLE after 3 attempts "
+            "(connection failures or stale GATT cache?)", address,
         )
         return False
 
@@ -1086,7 +1130,6 @@ def _is_device_adopted(hass: HomeAssistant, device_id: str) -> bool:
     firmware broadcast `resistive_sensor-4a0afc`, the new firmware broadcasts
     `smartvanio-res-4a0afc`, but the trailing 6 hex chars are stable.
     """
-    suffix = _hostname_mac_suffix(device_id)
     store_root = hass.data.get(DOMAIN) or {}
     for entry_store in store_root.values():
         if not isinstance(entry_store, dict):
@@ -1094,11 +1137,29 @@ def _is_device_adopted(hass: HomeAssistant, device_id: str) -> bool:
         devices = entry_store.get("devices") or {}
         if device_id in devices:
             return True
-        if suffix:
-            for cfg in devices.values():
-                mac_hex = (cfg.get("mac") or "").lower().replace(":", "").replace("-", "")
-                if mac_hex.endswith(suffix):
-                    return True
+    return _is_mac_suffix_adopted(hass, _hostname_mac_suffix(device_id))
+
+
+def _is_mac_suffix_adopted(hass: HomeAssistant, suffix: str | None) -> bool:
+    """True if any adopted device's MAC ends with this 6-hex-char suffix.
+
+    Split out of _is_device_adopted so the Bluetooth flow can reuse it. BLE
+    can't go through the hostname path: the advertised name is truncated
+    ("smartvanio-re-07876c" for "smartvanio-relay-07876c") and the abbreviation
+    is ambiguous — "re" is both "relay" and "res" — while passive scanning may
+    report no name at all. The MAC suffix is unambiguous and always derivable
+    from the BLE address, so match on that instead.
+    """
+    if not suffix:
+        return False
+    store_root = hass.data.get(DOMAIN) or {}
+    for entry_store in store_root.values():
+        if not isinstance(entry_store, dict):
+            continue
+        for cfg in (entry_store.get("devices") or {}).values():
+            mac_hex = (cfg.get("mac") or "").lower().replace(":", "").replace("-", "")
+            if mac_hex.endswith(suffix):
+                return True
     return False
 
 
